@@ -10,7 +10,7 @@ Resilience (see rtsp_reader.py and resilience.py):
     CAMERA_FRAME_TIMEOUT (hung inside FFmpeg), with backoff between restarts.
   - A face-recognition failure never switches recognition off for good: it
     is retried on a backoff, and the camera's pipeline is rebuilt after
-    repeated failures. Video, footfall, staff count and intrusion keep
+    repeated failures. Video, footfall and staff count keep
     running meanwhile — they don't depend on face recognition.
   - Stream state (RUNNING / CONNECTING / RECONNECTING / STALLED / FAILED /
     STOPPED) and last_frame_at are exposed for /ready and camera health.
@@ -27,9 +27,8 @@ from multiprocessing import shared_memory
 import cv2
 import numpy as np
 
-from . import analytics_settings, camera_db, config, footfall, intrusion, person_detection, resilience, rtsp_reader, visitors  # noqa: F401 (footfall/intrusion register as consumers on import)
+from . import analytics_settings, camera_db, config, footfall, person_detection, resilience, rtsp_reader, visitors  # noqa: F401 (footfall registers as a consumer on import)
 from .face_pipeline import discard_pipeline, get_pipeline
-from .object_detection.service import service as object_detection_service
 from .staff import service as _staff_service  # noqa: F401 (registers with person_detection on import)
 
 log = logging.getLogger("camera_stream")
@@ -363,7 +362,7 @@ class CameraStream:
                         self._feed_pipeline, frame, self.has_real_viewer() and analytics_settings.enabled("live_overlay")
                     )
 
-                # Footfall, Staff Count and intrusion share ONE person detector
+                # Footfall and Staff Count share ONE person detector
                 # per camera (person_detection.py), run at the rate the most
                 # demanding of them needs and only while one of them wants
                 # this camera. Hands off to its own executor, same reasoning
@@ -379,15 +378,6 @@ class CameraStream:
                     visitors.service.tap(self.camera_id, frame)
                 except Exception:
                     log.exception("camera %s: visitor clip buffer failed", self.camera_id)
-
-                # Object detection (backpack/handbag/bottle/laptop): keeps only
-                # the newest frame when this camera is due; its own worker
-                # does the inference (object_detection/service.py).
-                if analytics:
-                    try:
-                        object_detection_service.feed(self.camera_id, frame)
-                    except Exception:
-                        log.exception("camera %s: object detection dispatch failed", self.camera_id)
 
                 # JPEG-encode once per distinct width actually being watched.
                 # Full-HD JPEGs at 8 fps are ~17 Mbps per camera to each

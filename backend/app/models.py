@@ -55,7 +55,7 @@ def specs() -> list[ModelSpec]:
     md = Path(config.MODEL_DIR)
     return [
         ModelSpec("yolo_person", "YOLOv8n COCO person detector + tracker", _env_path("YOLO_PERSON_WEIGHTS", md / "yolov8n.pt"),
-                  ("person_detection", "footfall", "staff_count", "intrusion", "live_overlay", "face_recognition"),
+                  ("person_detection", "footfall", "staff_count", "live_overlay", "face_recognition"),
                   source="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt",
                   sha256="f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36"),
         ModelSpec("yolo_face", "YOLOv8n-face detector", _env_path("YOLO_FACE_WEIGHTS", md / "yolov8n-face.pt"),
@@ -73,21 +73,6 @@ def specs() -> list[ModelSpec]:
         ModelSpec("insightface_buffalo_l", "InsightFace buffalo_l (face alignment + ArcFace embedding)",
                   Path(config.INSIGHTFACE_ROOT) / "models" / "buffalo_l", ("face_recognition", "face_enrollment"),
                   is_dir=True, source="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"),
-        # Object detection (app/object_detection). Optional: only needed when
-        # the "object_detection" analytics switch is on. Source: the
-        # object-detection branch (models/), see scripts/fetch_models.py.
-        ModelSpec("od_general", "YOLO26s COCO model (object detection; laptop + person)",
-                  _env_path("OBJECT_DETECTION_GENERAL_MODEL", md / "yolo26s.pt"), ("object_detection",), required=False,
-                  source="git: origin/object-detection:models/yolo26s.pt",
-                  sha256="646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b"),
-        ModelSpec("od_specialist", "Backpack/handbag/bottle specialist (object detection)",
-                  md / "imc_general_best.pt", ("object_detection",), required=False,
-                  source="git: origin/object-detection:models/imc_general_best.pt",
-                  sha256="10848705a71b652b92aca53d05b94fda1661b20707e3dc432f9bd73293ed09f2"),
-        ModelSpec("od_fixtures", "Office fixtures classifier (object detection, optional)",
-                  md / "office_fixtures.pt", ("object_detection",), required=False,
-                  source="git: origin/object-detection:models/office_fixtures.pt",
-                  sha256="e8eacd65c8314b87f4ee04cf246dacc5f138aebfc5ef13695f939b1ccccbbfd7"),
         ModelSpec("expression_hf", f"Facial expression classifier ({EMOTION_HF_REPO})", _hf_cache_dir(EMOTION_HF_REPO),
                   ("expression",), required=False, is_dir=True, source=f"huggingface: {EMOTION_HF_REPO}"),
         ModelSpec("emotion_keras", "Keras emotion model (webcam Behavior Analytics demo)",

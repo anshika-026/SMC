@@ -9,11 +9,9 @@ const AI_FEATURES = new Set([
   "footfall",
   "visitors",
   "live_overlay",
-  "intrusion",
   "staff_count",
   "expression",
   "appearance_handoff",
-  "object_detection",
 ]);
 
 const ENABLED = new Set(

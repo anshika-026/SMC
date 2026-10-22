@@ -2,7 +2,7 @@
 resilience.py
 
 Failure handling for long-running analytics components (face recognition,
-person detection, footfall Re-ID, staff count, intrusion, expression).
+person detection, footfall Re-ID, staff count, expression).
 
 Each of these used to set a `failed = True` flag on its first exception and
 never run again until the whole process restarted: one bad frame, a

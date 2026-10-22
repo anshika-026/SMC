@@ -4,7 +4,7 @@ visitors.py
 Visitor Management: a visitor event every time a person ENTERS an area an admin
 marked on a camera, with a 10-second video clip of it. No face and no registered
 identity is needed: it works on tracked people (person_detection.py, the same
-detector footfall / staff count / intrusion share, so this adds no second
+detector footfall / staff count share, so this adds no second
 detection pass; cameras without a saved area cost nothing).
 
 Zone rule      A person is "in the area" when their FEET (bottom-centre of the box)

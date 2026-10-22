@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, ShieldAlert, UserCheck, Scale, ChevronRight, Radio } from "lucide-react";
+import { Eye, UserCheck, Scale, ChevronRight, Radio } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import LiveCameraTile from "../components/LiveCameraTile";
 import CameraViewerModal from "../components/CameraViewerModal";
@@ -27,13 +27,12 @@ export default function LiveFeed() {
 
   const onlineCount = cameras.filter((c) => c.status === "Active").length;
   const offlineCount = cameras.length - onlineCount;
-  // No supervision/intrusion/attendance analytics pipeline exists behind this
+  // No supervision/attendance analytics pipeline exists behind this
   // app yet, so these are honest placeholders derived from the real camera
   // list rather than fabricated backend numbers.
   const unsupervisedCameras = cameras.filter((c) => c.live !== "On");
   const insights = [
     { key: "unsupervised", icon: Eye, label: "Unsupervised", count: unsupervisedCameras.length },
-    { key: "intrusion", icon: ShieldAlert, label: "Intrusion alert", count: offlineCount },
     { key: "attendance", icon: UserCheck, label: "Attendance sync", count: "Verify" },
     { key: "ratio", icon: Scale, label: "1:8 Ratio", count: cameras.length ? `1:${cameras.length}` : "-" },
   ];

@@ -3,7 +3,7 @@ import { RefreshCw, Undo2, X } from "lucide-react";
 import * as api from "../api/client";
 
 // Draw polygon zones on a camera's live picture: click each corner, then save.
-// Shared by desk analytics (DeskZoneEditor) and intrusion zones. Points are
+// Shared by desk analytics (DeskZoneEditor). Points are
 // fractions of the frame (0..1), so zones survive a resolution change.
 //
 // Props:

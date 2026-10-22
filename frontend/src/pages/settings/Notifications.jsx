@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { featureOn } from "../../lib/features";
 
 function Toggle({ checked, onChange }) {
   return (
@@ -22,7 +21,6 @@ const SECTIONS = [
     title: "Camera",
     items: [
       { key: "cam_offline", label: "Camera offline, tracking data", checked: true },
-      featureOn("object_detection") && { key: "obj_detection", label: "Object detection stops", checked: false },
       { key: "ai_insights", label: "AI insights stops coming", checked: false },
     ],
   },
@@ -30,7 +28,6 @@ const SECTIONS = [
     title: "Alerts",
     items: [
       { key: "camera_stop", label: "Camera stops tracking data", checked: true },
-      featureOn("object_detection") && { key: "obj_detection2", label: "Object detection stops", checked: false },
       { key: "ai_insights2", label: "AI insights stops coming", checked: false },
     ],
   },

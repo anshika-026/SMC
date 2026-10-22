@@ -24,8 +24,6 @@ const Footfall = lazy(() => import("./pages/Footfall"));
 const VisitorManagement = lazy(() => import("./pages/VisitorManagement"));
 const StaffCount = lazy(() => import("./pages/StaffCount"));
 const FootfallUat = lazy(() => import("./pages/FootfallUat"));
-const Intrusion = lazy(() => import("./pages/Intrusion"));
-const ObjectDetection = lazy(() => import("./pages/ObjectDetection"));
 const CameraManagement = lazy(() => import("./pages/CameraManagement"));
 const SiteManagement = lazy(() => import("./pages/SiteManagement"));
 const LicenseManagement = lazy(() => import("./pages/LicenseManagement"));
@@ -103,8 +101,6 @@ export default function App() {
             <Route path="/visitors" element={<Feature name="visitors"><Page><VisitorManagement /></Page></Feature>} />
             <Route path="/footfall" element={<Feature name="footfall"><Page><Footfall /></Page></Feature>} />
             <Route path="/footfall-uat" element={<Feature name="footfall"><AdminRoute><Page><FootfallUat /></Page></AdminRoute></Feature>} />
-            <Route path="/intrusion" element={<Feature name="intrusion"><Page><Intrusion /></Page></Feature>} />
-            <Route path="/objects" element={<Feature name="object_detection"><Page><ObjectDetection /></Page></Feature>} />
             <Route path="/cameras" element={<AdminRoute><Page><CameraManagement /></Page></AdminRoute>} />
             <Route path="/sites" element={<AdminRoute><Page><SiteManagement /></Page></AdminRoute>} />
             <Route path="/licenses" element={<AdminRoute><Page><LicenseManagement /></Page></AdminRoute>} />

@@ -600,34 +600,6 @@ export async function fetchFootfallSnapshotObjectUrl(snapshotId) {
   return URL.createObjectURL(await res.blob());
 }
 
-// ---- Intrusion -----------------------------------------------------------
-// Real restricted-area zones (backend/app/intrusion.py). Detections arrive as
-// "Intrusion Detected" alerts.
-export async function getIntrusionZones(cameraId) {
-  return request(`/intrusion/zones${cameraId ? `?camera_id=${cameraId}` : ""}`);
-}
-export async function createIntrusionZone({ cameraId, name, polygon, from, to }) {
-  return request("/intrusion/zones", {
-    method: "POST",
-    body: JSON.stringify({ camera_id: cameraId, name, polygon, active_from: from || null, active_to: to || null }),
-  });
-}
-export async function updateIntrusionZone(id, fields) {
-  return request(`/intrusion/zones/${id}`, { method: "PATCH", body: JSON.stringify(fields) });
-}
-export async function deleteIntrusionZone(id) {
-  return request(`/intrusion/zones/${id}`, { method: "DELETE" });
-}
-export async function getIntrusionStats() {
-  return request("/intrusion/stats");
-}
-
-// ---- Object detection (backend/app/object_detection/) ----------------------
-// Latest backpack/handbag/bottle/laptop detections per camera.
-export async function getObjectDetections() {
-  return request("/objects/latest");
-}
-
 // ---- Staff Count (backend/app/staff/) -------------------------------------
 // Occupancy from entry/exit line crossings at entrance cameras; the count is
 // the backend's occupancy state, never the number of people in a frame.

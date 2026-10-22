@@ -13,7 +13,6 @@ const TITLES = {
   "/workforce": "Workforce",
   "/footfall": "Footfall",
   "/footfall-uat": "Footfall UAT",
-  "/intrusion": "Intrusion",
   "/cameras": "Camera Management",
   "/sites": "Site Management",
   "/settings/profile": "Settings",

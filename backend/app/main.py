@@ -37,10 +37,8 @@ models.apply_offline_environment()
 from . import audit, auth, camera_db, camera_stream, employee_directory, face_collection, face_db, face_pipeline, face_training_scheduler, license_db, ratelimit  # noqa: E402
 from .staff import routes as staff_routes  # noqa: E402
 from .staff.service import service as staff_service  # noqa: E402
-from . import alerts, alerts_routes, analytics_routes, analytics_settings, intrusion, intrusion_routes, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, license_routes, visitor_routes, visitors  # noqa: E402
+from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, license_routes, visitor_routes, visitors  # noqa: E402
 from . import health_routes, lifecycle, person_detection, retention  # noqa: E402
-from .object_detection import routes as object_detection_routes  # noqa: E402
-from .object_detection.service import service as object_detection_service  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -126,11 +124,9 @@ app.include_router(desk_routes.router)
 app.include_router(insights_routes.router)
 app.include_router(alerts_routes.router)
 app.include_router(analytics_routes.router)
-app.include_router(intrusion_routes.router)
 app.include_router(visitor_routes.router)
 app.include_router(staff_routes.router)
 app.include_router(health_routes.router)
-app.include_router(object_detection_routes.router)
 staff_routes.register_websockets(app)
 
 
@@ -178,7 +174,6 @@ def init_databases() -> None:
         log.warning(msg)
     attendance.init_db()
     alerts.init_db()
-    intrusion.init_db()
     visitors.init_db()
     desk_db.init_db()
 
@@ -203,15 +198,12 @@ def start_services() -> None:
     desks.service.start()
     # Camera-offline / footfall-stopped alert monitor.
     alerts.start()
-    intrusion.service.start()
     # Visitor Management: entry events, 10 s clips and the 24 h clean-up (see visitors.py).
     visitors.service.start()
     # Staff Count at entrance cameras (see app/staff/).
     staff_service.start()
     # Hourly cleanup of expired sessions, old captures/snapshots, backups (retention.py).
     retention.start()
-    # Object detection worker (idle until its analytics switch is on).
-    object_detection_service.start()
 
 
 def shutdown() -> None:
@@ -325,11 +317,11 @@ def update_camera(camera_id: int, payload: CameraUpdate, principal: dict = Depen
     if "live_feed_enabled" in fields:
         stream = camera_stream.get_stream(camera_id)
         stream.resume() if fields["live_feed_enabled"] else stream.stop()
-        # Background keep-alives (footfall, desks, intrusion) pick it up now,
+        # Background keep-alives (footfall, desks, staff count) pick it up now,
         # not in 15 s. Each is independent; one failing is logged and the
         # others still run (it will also catch up on its own periodic sync).
         for name, sync in (("footfall", footfall.service._sync_gates), ("desks", desks.service._sync),
-                           ("intrusion", intrusion.service.sync), ("staff", staff_service.sync)):
+                           ("staff", staff_service.sync)):
             try:
                 sync()
             except Exception:

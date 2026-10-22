@@ -23,7 +23,7 @@ import pytest  # noqa: E402
 # Every module that keeps its own module-level DB_PATH.
 _DB_MODULES = (
     "app.alerts", "app.analytics_settings", "app.attendance", "app.audit", "app.auth", "app.camera_db",
-    "app.desk_db", "app.face_db", "app.insights", "app.intrusion", "app.license_db",
+    "app.desk_db", "app.face_db", "app.insights", "app.license_db",
     "app.reid.peopleid_db", "app.reid.reid_db", "app.staff.occupancy",
 )
 

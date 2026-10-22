@@ -38,10 +38,10 @@ def set_feature(feature: str, payload: SwitchIn, _: dict = Depends(auth.require_
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown analytics feature {feature}")
     # Start/stop background streaming right away rather than at the next 15 s sync.
-    from app import desks, footfall, intrusion
+    from app import desks, footfall
     from app.staff.service import service as staff_service
 
-    for sync in (footfall.service._sync_gates, desks.service._sync, intrusion.service.sync, staff_service.sync):
+    for sync in (footfall.service._sync_gates, desks.service._sync, staff_service.sync):
         try:
             sync()
         except Exception:

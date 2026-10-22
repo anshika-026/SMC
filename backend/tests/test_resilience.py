@@ -190,27 +190,6 @@ def test_model_initialization_failure_is_retried(monkeypatch):
     assert not s.face_health.failed and attempts["n"] == 2
 
 
-# --- intrusion: executor exceptions are no longer swallowed ----------------------
-
-def test_intrusion_detection_failure_is_recorded_and_recovers(monkeypatch):
-    from app import intrusion
-
-    svc = intrusion.IntrusionService() if hasattr(intrusion, "IntrusionService") else type(intrusion.service)()
-    svc._health[3] = resilience.FeatureHealth("intrusion", 3, base=0, maximum=0)
-    boom = {"on": True}
-
-    def inner(*a):
-        if boom["on"]:
-            raise RuntimeError("database is locked")
-
-    monkeypatch.setattr(svc, "_detect_inner", inner)
-    svc._detect(3, FRAME, [], 1.0, [[0, 0, 1, 1]])
-    assert svc.health(3).failed
-    boom["on"] = False
-    svc._detect(3, FRAME, [], 2.0, [[0, 0, 1, 1]])
-    assert not svc.health(3).failed
-
-
 def test_footfall_gate_failure_is_retried_not_disabled(monkeypatch):
     from app import footfall
     from app.reid import reid_worker
