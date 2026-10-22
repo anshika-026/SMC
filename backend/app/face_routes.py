@@ -22,6 +22,7 @@ import logging
 import os
 import re
 
+import cv2
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
@@ -52,6 +53,16 @@ async def _read_upload(upload: UploadFile) -> bytes:
 def _largest_face(img):
     CameraFacePipeline._ensure_arcface_loaded()
     faces = CameraFacePipeline._arcface.get(img)
+    if not faces:
+        # InsightFace's detector needs some background around the face: a
+        # tight selfie where the face fills the frame is reported as "no face"
+        # (measured on real enrollment photos: none found as-is, 0.84-0.90 once
+        # a 35% border is added). Only tried when the first pass found nothing,
+        # so photos that already work cost nothing extra.
+        h, w = img.shape[:2]
+        by, bx = int(h * 0.35), int(w * 0.35)
+        faces = CameraFacePipeline._arcface.get(
+            cv2.copyMakeBorder(img, by, by, bx, bx, cv2.BORDER_CONSTANT, value=(114, 114, 114)))
     if not faces:
         return None
     return max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))

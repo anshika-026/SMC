@@ -59,6 +59,7 @@ from app import appearance
 from app import attendance
 from app import desks
 from app import face_db
+from app import face_matching
 from app import employee_directory, face_dataset
 from app import expression
 
@@ -92,6 +93,36 @@ YOLO_FACE_WEIGHTS = os.environ.get("YOLO_FACE_WEIGHTS", str(_MODELS_DIR / "yolov
 YOLO_PERSON_WEIGHTS = os.environ.get("YOLO_PERSON_WEIGHTS", str(_MODELS_DIR / "yolov8n.pt"))
 SAMPLE_FPS = float(os.environ.get("FACE_PIPELINE_FPS", "3"))  # frames/sec to run detection on
 MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.45"))  # cosine sim, tune per data
+
+# Cosine similarity needed to NAME someone on the live overlay from the enrolled
+# gallery (the review/auto-assign tiers keep MATCH_THRESHOLD above). 0.45 was
+# never measured. scripts/eval_face_matching.py on labelled CCTV captures of
+# enrolled people found same-person scores around 0.31-0.46 (median) and scores
+# against other people mostly under 0.25-0.29 (p95), so 0.45 rejected most real
+# reads. 0.35 keeps a clear gap above other people while accepting far more
+# genuine reads; a name still needs RECOGNITION_STABILITY_FRAMES agreeing reads
+# and a clear lead over the runner-up (face_matching.MATCH_MARGIN), and attendance
+# has its own stricter bar. Re-run the script after enrolling more people.
+LIVE_MATCH_THRESHOLD = float(os.environ.get("FACE_LIVE_MATCH_THRESHOLD", "0.35"))
+
+# Opt-in recognition diagnostics (FACE_DIAG=1): one rate-limited log line per
+# camera and rejection reason, never an image, a URL or a name. Counters are
+# always kept (cheap); see CameraFacePipeline.diag_snapshot().
+FACE_DIAG = os.environ.get("FACE_DIAG", "0").lower() in ("1", "true", "yes", "on")
+FACE_DIAG_INTERVAL_SECONDS = float(os.environ.get("FACE_DIAG_INTERVAL_SECONDS", "10"))
+
+# When InsightFace finds nothing in a YOLO-detected face crop (30-56% of captures
+# on these cameras), try ONCE more with grey background added around the crop.
+# Measured on 80 such crops (median short side ~91 px): 5% gave an embedding
+# as-is, 51% with the border, at detector confidence 0.57 (the default 0.5 gate
+# is kept; lowering it to 0.3 recovered 64% but only adds low-confidence faces
+# that match nobody). Runs only after a failure, and at most once per
+# FACE_EMBED_RETRY_SECONDS per person track, so frames that already work cost
+# nothing and an unrecognisable face is not retried every cycle.
+# FACE_EMBED_RETRY=0 turns it off.
+FACE_EMBED_RETRY = os.environ.get("FACE_EMBED_RETRY", "1").lower() in ("1", "true", "yes", "on")
+FACE_EMBED_RETRY_SECONDS = float(os.environ.get("FACE_EMBED_RETRY_SECONDS", "3"))
+FACE_EMBED_RETRY_BORDER = 0.5
 TRACK_MAX_AGE = 30  # frames a track can go unseen before it's dropped
 
 # Fraction of the YOLO box's width/height added on each side before cropping
@@ -438,6 +469,7 @@ class PersonTrackState:
     pending_identity: str | None = None   # stability-vote candidate, not yet committed
     pending_count: int = 0
     last_classify_frame: int = -999_999
+    last_embed_retry: float = 0.0   # wall clock of the last bordered embedding retry
     # Expression is advisory metadata only — it is never read by any
     # identity decision above, so a missing or failed mood can't change
     # who this person is (see expression.py).
@@ -482,6 +514,13 @@ class CameraFacePipeline:
         self._last_rescue_frame = -PERSON_RESCUE_INTERVAL_FRAMES
         self._gallery_cache: list[dict] = []
         self._gallery_loaded_at = 0.0
+        self._gallery_index = face_matching.build_index([])
+        self._gallery_problems_logged: tuple = (0, 0, 0)
+        # Diagnostics (see _diag): last log time per reason, running counts,
+        # and the last overlay MatchResult for the failure line.
+        self._diag_last_log: dict[str, float] = {}
+        self._diag_counts: dict[str, int] = {}
+        self._last_match: face_matching.MatchResult | None = None
         # Recent (timestamp, embedding) pairs for THIS camera only, used by
         # _is_recent_duplicate() — only ever read/written by this camera's
         # own background thread (feed_frame is called from exactly one
@@ -598,6 +637,18 @@ class CameraFacePipeline:
         if now - self._gallery_loaded_at > 30:
             self._gallery_cache = face_db.get_all_embeddings()
             self._gallery_loaded_at = now
+            # The live overlay matches against a de-duplicated, conflict-checked
+            # view of the gallery (face_matching.build_index). DB untouched.
+            self._gallery_index = face_matching.build_index(self._gallery_cache)
+            problems = (self._gallery_index.duplicates_dropped, self._gallery_index.invalid_dropped,
+                        len(self._gallery_index.conflicts))
+            if any(problems) and problems != self._gallery_problems_logged:
+                self._gallery_problems_logged = problems
+                log.warning(
+                    "camera %s: enrolled gallery has %d duplicate reference(s) ignored, %d invalid, "
+                    "%d cross-person conflict(s) %s excluded from matching - fix the enrollment data",
+                    self.camera_id, *problems,
+                    [(a, b) for a, b, _ in self._gallery_index.conflicts])
 
     @classmethod
     def _get_classifier(cls):
@@ -1007,11 +1058,22 @@ class CameraFacePipeline:
             expression.service.submit(self.camera_id, pstate.track_id, crop)
 
         embedding = self._embed(crop)
+        if embedding is None and FACE_EMBED_RETRY and time.time() - pstate.last_embed_retry >= FACE_EMBED_RETRY_SECONDS:
+            pstate.last_embed_retry = time.time()
+            embedding = self._embed_with_border(crop)
         if embedding is None:
+            fw, fh = fx2 - fx1, fy2 - fy1
+            self._diag("FACE_TOO_SMALL" if fw * fh < MIN_FACE_AREA else "NO_EMBEDDING",
+                       face_w=fw, face_h=fh, det_conf=float(_fconf), crop_w=px2 - px1, crop_h=py2 - py1)
             return
 
         predicted, score = self._identify_for_overlay(embedding)
         if predicted is None:
+            m = self._last_match
+            if m is not None:
+                self._diag(m.reason or "NO_MATCH", best=m.best_person_id, score=float(m.score),
+                           second=m.second_person_id, second_score=float(m.second_score),
+                           margin=float(m.margin), refs=m.n_refs, face_w=fx2 - fx1, face_h=fy2 - fy1)
             # Not confident this cycle, from either source. Does NOT clear
             # an already-committed identity (the grace period, checked at
             # display time, handles that decay) — just resets the stability
@@ -1140,25 +1202,52 @@ class CameraFacePipeline:
         when none has been trained; here the gallery is an additional
         source consulted whenever the classifier isn't sure.
         """
+        self._last_match = None
+        self._refresh_gallery()
+        res = face_matching.match(self._gallery_index, embedding, LIVE_MATCH_THRESHOLD)
+        self._last_match = res
         clf = self._get_classifier()
         if clf is not None:
             proba = clf.predict_proba(embedding.reshape(1, -1))[0]
             best_idx = int(np.argmax(proba))
             score = float(proba[best_idx])
             if score >= CLASSIFIER_MIN_PROBA:
-                return str(clf.classes_[best_idx]), score
+                predicted = str(clf.classes_[best_idx])
+                # The classifier is closed-set: it only knows the people it was
+                # last trained on and always answers with one of them. Measured
+                # on this install, several people enrolled AFTER the last
+                # training run were named as someone else at >= 0.6 (one on 7 of
+                # their 8 enrollment photos). A confident gallery match to a
+                # DIFFERENT person is evidence the classifier has never seen this
+                # face, so the gallery wins; otherwise the classifier answer
+                # stands exactly as before.
+                if res.person_id is not None and res.person_id != predicted:
+                    return res.person_id, res.score
+                return predicted, score
 
-        self._refresh_gallery()
-        best_person, best_score = None, -1.0
-        for entry in self._gallery_cache:
-            gallery_vec = np.array(entry["embedding"], dtype=np.float32)
-            score = float(np.dot(embedding, gallery_vec))  # cosine sim (both normalized)
-            if score > best_score:
-                best_score = score
-                best_person = entry["person_id"]
-        if best_person is not None and best_score >= MATCH_THRESHOLD:
-            return best_person, best_score
+        if res.person_id is not None:
+            return res.person_id, res.score
         return None, 0.0
+
+    def _diag(self, reason: str, **fields) -> None:
+        """Count one failed recognition attempt and, with FACE_DIAG on, log it
+        (at most once per FACE_DIAG_INTERVAL_SECONDS per reason on this
+        camera). Fields are numbers and employee ids only - no images, no
+        stream URLs, no names."""
+        self._diag_counts[reason] = self._diag_counts.get(reason, 0) + 1
+        if not FACE_DIAG:
+            return
+        now = time.time()
+        if now - self._diag_last_log.get(reason, 0.0) < FACE_DIAG_INTERVAL_SECONDS:
+            return
+        self._diag_last_log[reason] = now
+        log.info("face_diag camera=%s reason=%s seen=%d %s", self.camera_id, reason,
+                 self._diag_counts[reason],
+                 " ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in fields.items()))
+
+    def diag_snapshot(self) -> dict[str, int]:
+        """{rejection reason: how many attempts since this pipeline started}."""
+        return dict(self._diag_counts)
 
     def get_live_detections(self) -> list[dict]:
         """Snapshot for the /ws/detections/{camera_id} route — see the
@@ -1181,6 +1270,13 @@ class CameraFacePipeline:
         # Largest face in the crop (should be the only one)
         face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
         return face.normed_embedding  # already L2-normalized, 512-dim
+
+    def _embed_with_border(self, crop: np.ndarray) -> np.ndarray | None:
+        """_embed() on the crop with grey background added all round - the retry
+        for faces InsightFace's detector misses when they fill their crop."""
+        h, w = crop.shape[:2]
+        by, bx = int(h * FACE_EMBED_RETRY_BORDER), int(w * FACE_EMBED_RETRY_BORDER)
+        return self._embed(cv2.copyMakeBorder(crop, by, by, bx, bx, cv2.BORDER_CONSTANT, value=(114, 114, 114)))
 
     def _match(self, embedding: np.ndarray) -> tuple[str | None, float]:
         """Two modes, tried in this order:
