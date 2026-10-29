@@ -120,7 +120,7 @@ You don't need live cameras working to start building the gallery — `POST
 which works today. Example:
 
 ```bash
-curl -X POST http://127.0.0.1:8821/api/faces/enroll \
+curl -X POST http://127.0.0.1:8822/api/faces/enroll \
   -F "person_id=018" \
   -F "photo=@/path/to/aarti.jpg"
 ```

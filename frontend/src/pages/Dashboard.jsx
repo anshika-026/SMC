@@ -20,7 +20,7 @@ export default function Dashboard() {
           setStats(s);
           setError("");
         })
-        .catch(() => setError("Couldn't load the dashboard. Check the backend is running on port 8821."));
+        .catch(() => setError("Couldn't load the dashboard. Check the backend is running on port 8822."));
     load();
     const t = setVisibleInterval(load, 30000);
     return () => clearVisibleInterval(t);

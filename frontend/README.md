@@ -5,7 +5,7 @@ React + Vite + Tailwind single-page app for the Deco Vision admin and client por
 ## Development
 
 ```bash
-cp .env.example .env      # VITE_API_BASE_URL=http://127.0.0.1:8821/api
+cp .env.example .env      # VITE_API_BASE_URL=http://127.0.0.1:8822/api
 npm ci
 npm run dev               # http://localhost:5180 (fixed port, see vite.config.js)
 ```

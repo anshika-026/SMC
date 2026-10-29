@@ -69,14 +69,59 @@ def reconnect_delay(attempt: int, base: float, maximum: float, rand=random.rando
     return delay * (0.8 + 0.4 * rand())
 
 
+# FFmpeg options OpenCV passes to the demuxer, per protocol (OpenCV reads them from
+# the OPENCV_FFMPEG_CAPTURE_OPTIONS environment variable when a capture is opened).
+# RTMP: treat the stream as live (not a recording) so playback starts at the live
+# edge. RTSP deliberately gets no extra options: its behaviour is unchanged.
+RTMP_CAPTURE_OPTIONS = "rtmp_live;live"
+
+
+# Decoder threads per camera. FFmpeg otherwise starts one per CPU core in EVERY
+# camera's reader: measured with four 1080p/1440p cameras on an 8-core machine,
+# the readers alone took ~630% CPU while the backend process (all AI, the API and
+# the websockets) was left 74% and stopped answering requests. Two threads decode
+# these streams in real time; the frames are identical, only the CPU they may
+# take is bounded. RTSP_DECODE_THREADS=0 restores FFmpeg's own choice.
+def _decode_threads() -> int:
+    import os
+
+    try:
+        return max(0, int(os.environ.get("RTSP_DECODE_THREADS", "2")))
+    except ValueError:
+        return 2
+
+
+def capture_options_for(url: str) -> str | None:
+    return RTMP_CAPTURE_OPTIONS if url.lower().startswith(("rtmp://", "rtmps://")) else None
+
+
 def open_capture(url: str, connect_timeout: float, read_timeout: float):
+    import os
+
     import cv2
 
     params = [
         cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(connect_timeout * 1000),
         cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(read_timeout * 1000),
     ]
-    return cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+    threads = _decode_threads()
+    if threads and hasattr(cv2, "CAP_PROP_N_THREADS"):
+        params += [cv2.CAP_PROP_N_THREADS, threads]
+    options = capture_options_for(url)
+    if options is None:
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+    # Set only around the open (it is read then) and restored, so a capture of any
+    # other protocol opened later in this process never inherits RTMP options.
+    key = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
+    previous = os.environ.get(key)
+    os.environ[key] = options
+    try:
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
 
 
 def _parent_alive() -> bool:

@@ -23,7 +23,7 @@ export default function CameraViewerModal({ camera, onClose, overlay = true, fac
 
   if (!camera) return null;
 
-  const isLive = faceView ? live : status === "live";
+  const isLive = live;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
@@ -41,7 +41,13 @@ export default function CameraViewerModal({ camera, onClose, overlay = true, fac
           {!isLive && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-white/40 text-sm">
               <ShieldAlert size={28} />
-              {status === "connecting" ? "Connecting…" : status === "live" ? "Waiting for frames…" : "Offline"}
+              {status === "connecting"
+                ? "Connecting…"
+                : status === "live"
+                  ? camera.protocol === "rtmp_push"
+                    ? "No video received from the camera yet. Check that RTMP is enabled on the camera with this server and stream key."
+                    : "Connected — waiting for video…"
+                  : "Offline"}
             </div>
           )}
 

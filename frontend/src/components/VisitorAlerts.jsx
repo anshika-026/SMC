@@ -20,7 +20,7 @@ export function clipState(ev) {
 export default function VisitorAlerts({ events, cameras, filter, onFilter, loading, error, highlightIds, onOpen }) {
   const shown = (events || [])
     .filter((e) => !filter || e.camera_id === filter)
-    .sort((a, b) => b.entered_at - a.entered_at || b.id - a.id);
+    .sort((a, b) => (b.alert_at || b.entered_at) - (a.alert_at || a.entered_at) || b.id - a.id);
 
   return (
     <div className="card p-4 flex flex-col min-h-0">
@@ -56,13 +56,16 @@ export default function VisitorAlerts({ events, cameras, filter, onFilter, loadi
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-ink-900 truncate">{ev.camera_name}</p>
-                  <p className="text-xs text-slate-500">Visitor event #{ev.id}</p>
+                  <p className="text-xs text-slate-500">
+                    Visitor event #{ev.id}
+                    {ev.alert_seq > 1 && ` · repeat alert ${ev.alert_seq}, seated since ${fmtTime(ev.entered_at)}`}
+                  </p>
                 </div>
                 <span className={`badge ${cs.cls} shrink-0`}>{cs.label}</span>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                 <span className="flex items-center gap-1">
-                  <Clock size={12} /> {fmtDateTime(ev.entered_at)}
+                  <Clock size={12} /> {fmtDateTime(ev.alert_at || ev.entered_at)}
                 </span>
                 <span className="flex items-center gap-1">
                   <UserCheck size={12} /> {statusText(ev)}

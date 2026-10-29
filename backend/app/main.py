@@ -2,7 +2,10 @@ import asyncio
 import contextlib
 import logging
 import os
+import sqlite3
+import sys
 import time
+from typing import Literal
 
 # Must be set before numpy/torch/onnxruntime get imported (transitively, by
 # face_pipeline below) to take effect. Each of the 3 concurrent camera
@@ -29,6 +32,23 @@ import cv2
 
 from . import config, logging_setup, models
 
+# Every camera runs several CPU-heavy Python threads (face/person detection,
+# recognition, tracking) in this process, and all of them share Python's global
+# interpreter lock with the thread that serves the API and websockets. With the
+# default 5 ms switch interval and dozens of busy threads, the API thread waited
+# so long for its turn that requests took 25 s+ or timed out (measured with four
+# cameras on an 8-core laptop) while the backend used under 3 cores. Handing the
+# lock over more often keeps the API responsive at a small cost to AI throughput.
+sys.setswitchinterval(float(os.environ.get("PY_GIL_SWITCH_INTERVAL", "0.0005")))
+
+# Diagnostics: `docker kill -s USR1 smc-backend` (or kill -USR1 <pid>) writes every
+# thread's current Python stack to stderr - shows what a stalled API is waiting on.
+if hasattr(__import__("signal"), "SIGUSR1"):
+    import faulthandler
+    import signal
+
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+
 logging_setup.configure()
 # Before any ML library is imported below: no runtime model downloads in
 # offline mode (see models.py).
@@ -37,8 +57,9 @@ models.apply_offline_environment()
 from . import audit, auth, camera_db, camera_stream, employee_directory, face_collection, face_db, face_pipeline, face_training_scheduler, license_db, ratelimit  # noqa: E402
 from .staff import routes as staff_routes  # noqa: E402
 from .staff.service import service as staff_service  # noqa: E402
-from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, license_routes, visitor_routes, visitors  # noqa: E402
-from . import health_routes, lifecycle, person_detection, retention  # noqa: E402
+from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, ingest, license_routes, rtsp_reader, stream_source, visitor_routes, visitors  # noqa: E402
+from . import health_routes, heap, lifecycle, person_detection, retention  # noqa: E402
+from .ratelimit import SlidingWindowLimiter  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -60,6 +81,9 @@ async def lifespan(_app):
     check_configuration()
     init_databases()
     start_services()
+    # Keep garbage collection from freezing the server (see heap.py).
+    heap.freeze("startup")
+    heap.install()
     log.info("startup complete (APP_ENV=%s)", config.APP_ENV)
     try:
         yield
@@ -241,6 +265,12 @@ class CameraIn(BaseModel):
     vendor: str = ""
     live_feed_enabled: bool = True
     attendance_tracking: bool = True
+    # How the camera is read. Existing cameras (and any client that does not send
+    # this) are RTSP and use host/port/user/password/stream_path as before. An RTMP
+    # camera sends its full link (rtmp://host/app/stream-key) in source_url.
+    # rtmp_push: the camera publishes to us; SMC generates its key (see ingest.py).
+    protocol: Literal["rtsp", "rtmp", "rtmp_push"] = "rtsp"
+    source_url: str | None = None
 
 
 class CameraUpdate(BaseModel):
@@ -256,6 +286,51 @@ class CameraUpdate(BaseModel):
     vendor: str | None = None
     live_feed_enabled: bool | None = None
     attendance_tracking: bool | None = None
+    protocol: Literal["rtsp", "rtmp", "rtmp_push"] | None = None
+    source_url: str | None = None
+
+
+# Fields that change how (or where) a camera is read: editing any of them
+# reconnects a running camera so the change takes effect without a restart.
+_CONNECTION_FIELDS = {"protocol", "source_url", "host", "port", "user", "password", "stream_path"}
+
+
+def _push_fields() -> dict:
+    """An RTMP-push camera has no address of its own: it is read from the ingest
+    server by its key. host is a fixed, non-secret marker (see stream_source)."""
+    return {"protocol": stream_source.PUSH_PROTOCOL, "host": stream_source.PUSH_HOST,
+            "port": config.RTMP_PUBLIC_PORT, "user": "", "password": "", "stream_path": "", "source_url": ""}
+
+
+def _assign_new_key(camera_id: int) -> str:
+    """A fresh unique key for a camera (a collision, ~2^-96, just retries)."""
+    for _ in range(5):
+        key = stream_source.generate_stream_key()
+        try:
+            camera_db.set_stream_key(camera_id, key)
+            return key
+        except sqlite3.IntegrityError:
+            continue
+    raise HTTPException(status_code=500, detail="Could not create a stream key, try again")
+
+
+def _setup_payload(camera_id: int, key: str) -> dict:
+    """Setup details for the RTMP setup screen, or a clear 'not configured'."""
+    try:
+        return {"camera_id": camera_id, **ingest.setup_for(key)}
+    except ingest.NotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+def _rtmp_fields(source_url: str | None) -> dict:
+    """Validated RTMP link plus the non-secret host/port derived from it (shown in
+    the camera list). The link itself only ever goes into source_url."""
+    try:
+        url = stream_source.validate_rtmp_url(source_url)
+    except stream_source.SourceError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    host, port = stream_source.rtmp_host_port(url)
+    return {"source_url": url, "host": host, "port": port, "user": "", "password": "", "stream_path": ""}
 
 
 @app.get("/api/cameras")
@@ -276,24 +351,50 @@ def list_cameras(principal: dict = Depends(auth.get_principal)):
 
 @app.post("/api/cameras")
 def create_camera(payload: CameraIn, principal: dict = Depends(auth.require_admin)):
-    camera_id = camera_db.add_camera(payload.name, payload.site, **payload.model_dump(exclude={"name", "site"}))
-    audit.record("camera.create", principal, target=f"camera:{camera_id}", name=payload.name)
-    return camera_db.get_camera(camera_id)
+    fields = payload.model_dump(exclude={"name", "site"})
+    if payload.protocol == "rtmp":
+        fields.update(_rtmp_fields(payload.source_url))
+    elif payload.protocol == stream_source.PUSH_PROTOCOL:
+        fields.update(_push_fields())
+    else:
+        fields["source_url"] = ""      # an RTSP camera never carries an RTMP link
+    camera_id = camera_db.add_camera(payload.name, payload.site, **fields)
+    audit.record("camera.create", principal, target=f"camera:{camera_id}", name=payload.name, protocol=payload.protocol)
+    cam = camera_db.get_camera(camera_id)
+    if payload.protocol == stream_source.PUSH_PROTOCOL:
+        key = _assign_new_key(camera_id)
+        cam = camera_db.get_camera(camera_id)
+        # The setup details come back with the creation response (shown once on the
+        # setup screen) and can be fetched again later through /rtmp-setup.
+        try:
+            cam["rtmp_setup"] = {"camera_id": camera_id, **ingest.setup_for(key)}
+        except ingest.NotConfigured as e:
+            cam["rtmp_setup"], cam["rtmp_setup_error"] = None, str(e)
+    return cam
 
 
 class StreamTestIn(BaseModel):
-    rtsp_url: str
+    rtsp_url: str | None = None      # original field, still accepted (RTSP)
+    url: str | None = None           # either protocol
+    protocol: Literal["rtsp", "rtmp"] | None = None
 
 
 @app.post("/api/cameras/test-stream")
 def test_camera_stream(payload: StreamTestIn, _: dict = Depends(auth.require_admin)):
-    """Connects to an RTSP link once and returns a single still (JPEG), so the
-    Add Camera form can show the link works before it's saved. Runs in
-    FastAPI's threadpool (plain def), so a slow camera never blocks others."""
-    url = payload.rtsp_url.strip()
-    if not url.lower().startswith("rtsp://"):
+    """Connects to an RTSP or RTMP link once and returns a single still (JPEG), so
+    the Add Camera form can show the link works before it's saved. Runs in
+    FastAPI's threadpool (plain def), so a slow camera never blocks others. The
+    link is never echoed back in an error or written to the log."""
+    url = (payload.url or payload.rtsp_url or "").strip()
+    protocol = payload.protocol or ("rtmp" if url.lower().startswith(("rtmp://", "rtmps://")) else "rtsp")
+    if protocol == "rtmp":
+        try:
+            url = stream_source.validate_rtmp_url(url)
+        except stream_source.SourceError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+    elif not url.lower().startswith("rtsp://"):
         raise HTTPException(status_code=422, detail="The link must start with rtsp://")
-    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000])
+    cap = rtsp_reader.open_capture(url, 8.0, 8.0)
     try:
         if not cap.isOpened():
             raise HTTPException(status_code=400, detail="Couldn't connect. Check the address, port, username and password.")
@@ -311,9 +412,41 @@ def update_camera(camera_id: int, payload: CameraUpdate, principal: dict = Depen
     if camera_db.get_camera(camera_id) is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     fields = payload.model_dump(exclude_unset=True)
+    sent = set(fields)                                      # what the user changed, for the audit entry
+    existing = camera_db.get_camera_connection(camera_id) or {}
+    if "protocol" in fields or "source_url" in fields:
+        protocol = fields.get("protocol") or stream_source.protocol_of(existing)
+        if protocol == stream_source.PUSH_PROTOCOL:
+            fields.pop("source_url", None)
+            fields.update(_push_fields())
+        elif protocol == "rtmp":
+            new_link = (fields.pop("source_url", None) or "").strip()
+            if new_link:                                  # a new link replaces the stored one
+                fields.update(_rtmp_fields(new_link))
+            elif not (existing.get("source_url") or "").strip():
+                raise HTTPException(status_code=422, detail="Enter the RTMP link, for example rtmp://host/app/stream-key.")
+            # blank link on an RTMP camera that has one = unchanged (the form never
+            # shows the stored link, so blank means "keep it")
+            fields["protocol"] = "rtmp"
+        else:
+            fields["protocol"] = "rtsp"
+            fields["source_url"] = ""
+    # Reconnect only if how the camera is read actually changes: the edit form resends
+    # the protocol and address on every save, and renaming a camera must not drop its video.
+    reconnect = any(k in fields and fields[k] != existing.get(k) for k in _CONNECTION_FIELDS)
     camera_db.update_camera(camera_id, **fields)
+    was_push = stream_source.protocol_of(existing) == stream_source.PUSH_PROTOCOL
+    is_push = fields.get("protocol", stream_source.protocol_of(existing)) == stream_source.PUSH_PROTOCOL
+    if is_push and not existing.get("rtmp_stream_key"):
+        _assign_new_key(camera_id)
+        reconnect = True
+    elif was_push and not is_push and existing.get("rtmp_stream_key"):
+        # No longer a push camera: its key stops working and its publisher is dropped.
+        camera_db.set_stream_key(camera_id, None)
+        ingest.kick_publishers(existing["rtmp_stream_key"])
     audit.record("camera.update", principal, target=f"camera:{camera_id}",
-                 fields=sorted(k for k in fields if k != "password"), password_changed="password" in fields)
+                 fields=sorted(k for k in sent if k not in ("password", "source_url")),
+                 password_changed="password" in sent, source_changed="source_url" in sent and reconnect)
     if "live_feed_enabled" in fields:
         stream = camera_stream.get_stream(camera_id)
         stream.resume() if fields["live_feed_enabled"] else stream.stop()
@@ -326,12 +459,90 @@ def update_camera(camera_id: int, payload: CameraUpdate, principal: dict = Depen
                 sync()
             except Exception:
                 log.exception("camera %s: %s resync after feed change failed", camera_id, name)
+    if reconnect and "live_feed_enabled" not in fields:
+        camera_stream.get_stream(camera_id).restart()    # reconnect with the new details
     return camera_db.get_camera(camera_id)
+
+
+# Setup details and key rotation are admin-only and rate-limited per admin.
+_rtmp_setup_limiter = SlidingWindowLimiter(60, 60.0)
+_rtmp_rotate_limiter = SlidingWindowLimiter(5, 600.0)
+
+
+def _limit(limiter: SlidingWindowLimiter, principal: dict) -> None:
+    who = str(principal.get("admin_user_id") or principal.get("token") or "admin")
+    wait = limiter.retry_after(who)
+    if wait > 0:
+        raise HTTPException(status_code=429, detail="Too many requests, try again shortly",
+                            headers={"Retry-After": str(int(wait) + 1)})
+    limiter.hit(who)
+
+
+def _push_camera(camera_id: int) -> dict:
+    cam = camera_db.get_camera_connection(camera_id)
+    if cam is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if stream_source.protocol_of(cam) != stream_source.PUSH_PROTOCOL or not cam.get("rtmp_stream_key"):
+        raise HTTPException(status_code=404, detail="This camera does not use RTMP push")
+    return cam
+
+
+@app.get("/api/cameras/{camera_id}/rtmp-setup")
+def get_rtmp_setup(camera_id: int, principal: dict = Depends(auth.require_admin)):
+    """RTMP server, stream key and one-field URL for an RTMP-push camera, plus
+    whether its video is actually arriving (Online only on real frames)."""
+    _limit(_rtmp_setup_limiter, principal)
+    cam = _push_camera(camera_id)
+    out = _setup_payload(camera_id, cam["rtmp_stream_key"])
+    out.update(ingest.stream_status(camera_id, cam["rtmp_stream_key"], camera_stream.get_stream(camera_id)))
+    return out
+
+
+@app.post("/api/cameras/{camera_id}/rtmp-key/rotate")
+def rotate_rtmp_key(camera_id: int, principal: dict = Depends(auth.require_admin)):
+    """New stream key for a camera whose key may be compromised. The old key
+    stops working at once and anyone still publishing with it is disconnected;
+    the camera must be given the new key."""
+    _limit(_rtmp_rotate_limiter, principal)
+    cam = _push_camera(camera_id)
+    old = cam["rtmp_stream_key"]
+    key = _assign_new_key(camera_id)
+    ingest.kick_publishers(old)
+    camera_stream.get_stream(camera_id).restart()
+    audit.record("camera.rtmp_key_rotated", principal, target=f"camera:{camera_id}")
+    return _setup_payload(camera_id, key)
+
+
+@app.post("/api/ingest/auth")
+async def ingest_auth(request: Request, secret: str | None = None):
+    """Called by the ingest server for every publish/read. 200 = allow, 401 = deny.
+    Authenticated by a shared secret, not a user session; never logs a key."""
+    if not ingest.hook_secret_ok(secret):
+        raise HTTPException(status_code=401, detail="denied")
+    try:
+        req = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad request")
+    if not isinstance(req, dict):
+        raise HTTPException(status_code=400, detail="bad request")
+    d = await asyncio.to_thread(ingest.decide, req)
+    if req.get("action") in ("publish", "read"):
+        log.info("ingest %s %s from %s: %s%s", req.get("action"), "allowed" if d.allowed else "denied",
+                 req.get("ip") or "?", d.reason, f" (camera {d.camera_id})" if d.camera_id else "")
+    if not d.allowed:
+        raise HTTPException(status_code=401, detail="denied")
+    if req.get("action") == "publish" and d.camera_id is not None:
+        # Start reading the camera's stream now (playback + AI), see ingest.ensure_reading.
+        await asyncio.to_thread(ingest.ensure_reading, d.camera_id)
+    return {"ok": True}
 
 
 @app.delete("/api/cameras/{camera_id}")
 def delete_camera(camera_id: int, principal: dict = Depends(auth.require_admin)):
     camera_db.delete_camera(camera_id)
+    # Stop its read loop and reader process now, not at the next restart.
+    camera_stream.remove_stream(camera_id)
+    ingest.forget(camera_id)
     audit.record("camera.delete", principal, target=f"camera:{camera_id}")
     return {"ok": True}
 
@@ -614,8 +825,9 @@ async def ws_detections(websocket: WebSocket, camera_id: int, token: str | None 
             # size lets a viewer showing a scaled-down picture place them.
             # If recognition has not produced an update for a while (CPU-bound, stalled),
             # showing its last boxes would pretend they are current: send none instead.
-            if pipeline is not None and pipeline.last_overlay_at and time.time() - pipeline.last_overlay_at > OVERLAY_STALE_SECONDS:
-                people = []
+            # (Boxes are no longer blanked wholesale when the pipeline is slow: every
+            # box expires on its own clock inside get_live_detections(), so a busy
+            # pipeline shows a small "delayed" badge instead of a blinking overlay.)
             fw, fh = pipeline.frame_size if pipeline is not None and pipeline.frame_size else (None, None)
             await websocket.send_json({
                 "people": people, "fire_smoke": [], "frame_w": fw, "frame_h": fh,
@@ -624,7 +836,7 @@ async def ws_detections(websocket: WebSocket, camera_id: int, token: str | None 
                 "server_time": time.time(),
             })
             await asyncio.sleep(0.3)
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):   # RuntimeError: browser closed mid-send
         pass
 
 
@@ -644,6 +856,5 @@ def _employee_display_name(employee_id: str) -> str:
     return _names_cache.get(employee_id, employee_id)
 
 
-OVERLAY_STALE_SECONDS = 6.0
 _names_cache: dict[str, str] = {}
 _names_cached_at = -1e9

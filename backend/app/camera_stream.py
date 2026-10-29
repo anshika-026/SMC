@@ -27,7 +27,7 @@ from multiprocessing import shared_memory
 import cv2
 import numpy as np
 
-from . import analytics_settings, camera_db, config, footfall, person_detection, resilience, rtsp_reader, visitors  # noqa: F401 (footfall registers as a consumer on import)
+from . import analytics_settings, camera_db, config, footfall, person_detection, resilience, rtsp_reader, stream_source, visitors  # noqa: F401 (footfall registers as a consumer on import)
 from .face_pipeline import discard_pipeline, get_pipeline
 from .staff import service as _staff_service  # noqa: F401 (registers with person_detection on import)
 
@@ -43,27 +43,34 @@ S_FAILED = "FAILED"              # RTSP_MAX_RETRIES consecutive failures (still 
 S_STOPPED = "STOPPED"            # feed switched off / not configured
 
 
-def _reader_settings() -> dict:
-    return {
+# An RTMP-push camera is read from the local ingest server, where "no stream yet"
+# just means the camera has not started publishing: retrying is cheap, so the
+# backend notices a camera that comes online within a few seconds instead of
+# after a long back-off.
+PUSH_RECONNECT_MAX_DELAY = 5.0
+
+
+def _reader_settings(protocol: str = "rtsp") -> dict:
+    s = {
         "connect_timeout": config.RTSP_CONNECT_TIMEOUT,
         "read_timeout": config.RTSP_READ_TIMEOUT,
         "reconnect_delay": config.RTSP_RECONNECT_DELAY,
         "reconnect_max_delay": config.RTSP_RECONNECT_MAX_DELAY,
     }
+    if protocol == stream_source.PUSH_PROTOCOL:
+        s["reconnect_max_delay"] = min(s["reconnect_max_delay"], PUSH_RECONNECT_MAX_DELAY)
+    return s
 
 
 def build_rtsp_url(cam: dict) -> str | None:
-    host = cam.get("host")
-    if not host:
-        return None
-    port = cam.get("port") or 554
-    user = cam.get("user") or ""
-    password = cam.get("password") or ""
-    path = cam.get("stream_path") or ""
-    if not path.startswith("/"):
-        path = "/" + path
-    auth = f"{user}:{password}@" if user or password else ""
-    return f"rtsp://{auth}{host}:{port}{path}"
+    return stream_source.build_rtsp_url(cam)
+
+
+def build_source_url(cam: dict | None) -> str | None:
+    """What this camera's reader opens: its RTMP link, or the RTSP URL built from
+    host/port/user/password/path. Both protocols then follow the same path:
+    one reader process -> shared memory -> this loop -> browser + AI."""
+    return stream_source.build_source_url(cam)
 
 
 class CameraStream:
@@ -151,6 +158,25 @@ class CameraStream:
                 self._thread = threading.Thread(target=self._run, daemon=True)
                 self._thread.start()
 
+    def restart(self) -> None:
+        """The camera's connection details changed (protocol, address, login):
+        end the read loop and its reader process, then reconnect with the new
+        details if anything is subscribed. Runs off the caller's thread - stopping
+        a reader can take several seconds - and never starts a second reader
+        beside the first: the old loop is fully stopped before the new one starts."""
+        threading.Thread(target=self._restart_blocking, daemon=True, name=f"restart-cam{self.camera_id}").start()
+
+    def _restart_blocking(self) -> None:
+        self._stop.set()
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(timeout=20)
+            if t.is_alive():
+                log.warning("camera %s: stream did not stop in time; keeping the current connection", self.camera_id)
+                self._stop.clear()
+                return
+        self.resume()
+
     def has_real_viewer(self) -> bool:
         with self._lock:
             return len(self._subscribers) > len(self._collector_subscribers)
@@ -230,10 +256,10 @@ class CameraStream:
             log.info("camera %s: feed switched off, not connecting", self.camera_id)
             self.state, self.state_detail = S_STOPPED, "feed switched off"
             return
-        url = build_rtsp_url(cam) if cam else None
+        url = build_source_url(cam) if cam else None
         if not url:
-            log.warning("camera %s: no host configured, nothing to stream", self.camera_id)
-            self.state, self.state_detail = S_STOPPED, "no host configured"
+            log.warning("camera %s: no address configured, nothing to stream", self.camera_id)
+            self.state, self.state_detail = S_STOPPED, "no address configured"
             return
         self.state, self.state_detail = S_CONNECTING, None
         # A camera with attendance_tracking off is live view only: frames are
@@ -263,7 +289,8 @@ class CameraStream:
             meta_q = ctx.Queue(maxsize=256)
             last_seq = 0
             proc = ctx.Process(
-                target=rtsp_reader.run, args=(url, config.LIVE_STREAM_FPS, stop, seq, meta_q, _reader_settings()),
+                target=rtsp_reader.run, args=(url, config.LIVE_STREAM_FPS, stop, seq, meta_q,
+                                              _reader_settings(stream_source.protocol_of(cam))),
                 daemon=True, name=f"rtsp-reader-{self.camera_id}",
             )
             proc.start()
@@ -423,6 +450,26 @@ def get_stream(camera_id: int) -> CameraStream:
             stream = CameraStream(camera_id)
             _streams[camera_id] = stream
         return stream
+
+
+def remove_stream(camera_id: int, timeout: float = 20.0) -> None:
+    """A camera was deleted: stop its read loop and reader process, drop its
+    inference executor and pipeline, and forget the stream, so nothing keeps
+    running (or holding a connection to the source) for a camera that no longer
+    exists. A new camera that reuses the id starts from a clean stream."""
+    with _streams_lock:
+        stream = _streams.pop(camera_id, None)
+    if stream is None:
+        discard_pipeline(camera_id)
+        return
+    stream._stop.set()
+    t = stream._thread
+    if t is not None and t.is_alive():
+        t.join(timeout=timeout)
+        if t.is_alive():
+            log.warning("camera %s: stream thread did not stop within %.0fs", camera_id, timeout)
+    stream._pipeline_executor.shutdown(wait=False, cancel_futures=True)
+    discard_pipeline(camera_id)
 
 
 class _StillSink:

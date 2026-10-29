@@ -107,6 +107,7 @@ export default function VisitorEventDetail({ eventId, initial, onClose, onDelete
         ["Camera", ev.camera_name],
         ["Track ID", ev.track_id],
         ["Entered", fmtDateTime(ev.entered_at)],
+        ...(ev.alert_seq > 1 ? [["Alert", `Repeat alert ${ev.alert_seq} at ${fmtDateTime(ev.alert_at)} (still seated)`]] : []),
         ["Departure", ev.left_at ? fmtDateTime(ev.left_at) : "Still inside"],
         ...(ev.left_at ? [["How departure was determined", ev.departure === "tracked" ? "Detected" : ev.departure === "assumed" ? "Assumed" : "-"]] : []),
       ]

@@ -75,7 +75,7 @@ itself. Why:
    but directly caused by it (new `TRAINING_CAPTURE_DIR` hit the same bug
    `CAPTURE_DIR`/`ENROLL_DIR` already had).
 3. **Labeling page is a React route** (`/face-training` in the existing
-   frontend, port 5180), not a FastAPI-served page at `127.0.0.1:8821`. The
+   frontend, port 5180), not a FastAPI-served page at `127.0.0.1:8822`. The
    frontend already has full routing, styling and a dev server; building a
    second, separate HTML page inside the Python backend would duplicate all
    of that. CORS already permits this exact cross-origin pattern (see
@@ -182,7 +182,7 @@ local employee roster first: `POST /api/faces/training/employees/sync`.
 Once you've labeled at least 2 employees with at least 2 captures each:
 
 ```bash
-curl -X POST http://127.0.0.1:8821/api/faces/training/train
+curl -X POST http://127.0.0.1:8822/api/faces/training/train
 ```
 
 Returns `{"trained_on_samples": N, "employees": [...], "excluded_too_few_samples": {...}, "model_path": "..."}`.

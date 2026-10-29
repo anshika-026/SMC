@@ -73,7 +73,7 @@ IS_PRODUCTION = APP_ENV == "production"
 
 # --- Server -------------------------------------------------------------------
 HOST = _str("HOST", "127.0.0.1")
-PORT = _int("PORT", 8821)
+PORT = _int("PORT", 8822)   # SMC; 8821 is MAINDV's backend on the same machine
 
 # Browser origins allowed to call this API / open websockets. Never "*":
 # the API uses credentials, and a wildcard would let any site drive it.
@@ -119,6 +119,27 @@ RTSP_RECONNECT_MAX_DELAY = _float("RTSP_RECONNECT_MAX_DELAY", 60.0)  # backoff c
 # Consecutive failed connects before a camera is reported FAILED (it keeps
 # retrying at the max delay; this only changes the reported state).
 RTSP_MAX_RETRIES = _int("RTSP_MAX_RETRIES", 10)
+
+# --- RTMP push ingest (cameras that stream TO us; see ingest.py) -------------------
+# What a camera is told to publish to. RTMP_PUBLIC_HOST must be the address the
+# CAMERAS can reach (LAN IP or public DNS name). Left empty, the setup screen
+# says RTMP push is not configured instead of showing a made-up address.
+RTMP_PUBLIC_HOST = _str("RTMP_PUBLIC_HOST", "")
+RTMP_PUBLIC_PORT = _int("RTMP_PUBLIC_PORT", 1935)
+# rtmps only once the ingest server has a TLS certificate (see mediamtx.yml).
+RTMP_PUBLIC_SCHEME = _str("RTMP_PUBLIC_SCHEME", "rtmp").lower()
+RTMP_APP = _str("RTMP_APP", "live").strip("/")
+# How the one-field "full URL" is assembled; {server} and {key} are substituted.
+# Most devices take server + "/" + key; a few want e.g. "{server}?key={key}".
+RTMP_FULL_URL_FORMAT = _str("RTMP_FULL_URL_FORMAT", "{server}/{key}")
+# Where the backend READS pushed streams from (the ingest server's internal RTSP
+# side), with the read-only account the auth hook accepts.
+INGEST_RTSP_BASE = _str("INGEST_RTSP_BASE", "rtsp://mediamtx:8554").rstrip("/")
+INGEST_API_URL = _str("INGEST_API_URL", "http://mediamtx:9997").rstrip("/")
+INGEST_READ_USER = _str("INGEST_READ_USER", "smc-reader")
+INGEST_READ_PASSWORD = _str("INGEST_READ_PASSWORD", "")
+# Shared secret the ingest server sends with every auth-hook call.
+INGEST_HOOK_SECRET = _str("INGEST_HOOK_SECRET", "")
 # No new frame for this long = the reader is stalled; the watchdog restarts it.
 CAMERA_FRAME_TIMEOUT = _float("CAMERA_FRAME_TIMEOUT", 20.0)
 CAMERA_WATCHDOG_INTERVAL = _float("CAMERA_WATCHDOG_INTERVAL", 2.0)

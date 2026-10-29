@@ -114,20 +114,28 @@ def delete_event(event_id: int, principal: dict = Depends(auth.require_admin)):
 @router.get("/settings")
 def settings():
     latest = visitors.MAX_PRESENCE_HOURS + visitors.RETENTION_AFTER_DEPARTURE_HOURS
+    repeat = visitors.REPEAT_ALERT_MINUTES
     return {
         "entry_confirm_looks": visitors.ENTRY_CONFIRM_LOOKS,
         "exit_grace_seconds": visitors.EXIT_GRACE_SECONDS,
-        "one_alert_per_visitor": True,
-        "reentry_suppress_seconds": visitors.REENTRY_SUPPRESS_SECONDS,
+        "absence_grace_seconds": visitors.ABSENCE_GRACE_SECONDS,
+        "detection_gap_seconds": visitors.DETECTION_GAP_SECONDS,
+        "repeat_alert_minutes": repeat,
+        "exclude_employees": visitors.EXCLUDE_EMPLOYEES,
+        "employee_sources": sorted(visitors.EMPLOYEE_SOURCES),
+        "one_alert_per_visitor": repeat <= 0,
         "clip_pre_seconds": visitors.PRE_SECONDS,
         "clip_post_seconds": visitors.POST_SECONDS,
         "retention_after_departure_hours": visitors.RETENTION_AFTER_DEPARTURE_HOURS,
         "max_presence_hours": visitors.MAX_PRESENCE_HOURS,
         "latest_deletion_hours_after_entry": latest,
         "rules": {
-            "new_entry": "A person standing inside the area on 2 looks in a row (about 1 second) is a new visitor.",
-            "reentry": "Each visitor raises one alert only: someone who leaves the area and comes back does not alert again "
-                       "(if the camera loses sight of them completely and they return as a new tracked person, they count as a new visitor).",
+            "new_entry": f"An unknown person who stays in the area for {visitors.DETECTION_GAP_SECONDS:g} seconds raises a visitor alert"
+                         + (" - recognised employees never do." if visitors.EXCLUDE_EMPLOYEES else "."),
+            "reentry": (f"While they stay, they are alerted again every {repeat:g} minutes (not more often); "
+                        if repeat > 0 else "Each visit raises one alert; ")
+                       + f"a short loss of sight does not count as leaving. After {visitors.ABSENCE_GRACE_SECONDS:g} seconds "
+                         "out of the area the visit ends, and coming back starts a new one.",
             "retention": f"Clips are deleted {visitors.RETENTION_AFTER_DEPARTURE_HOURS:g} h after the visitor left the area; "
                          f"if their departure is never established, at the latest {latest:g} h after they entered.",
         },

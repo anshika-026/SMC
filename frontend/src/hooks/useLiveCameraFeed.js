@@ -30,7 +30,7 @@ const OVERLAY_COLOR = "#2563eb";
 // tiles). `k` undoes that scale for line and text sizes, so the box and label
 // look the same whatever the picture's resolution.
 // Face-recognition viewer label. A name is only ever shown for a track that
-// really has an identity; a visible face without one reads "Unknown".
+// really has an identity; everyone else reads "Person" - never "Unknown".
 function faceLabelOf(det) {
   const name = typeof det.name === "string" ? det.name.trim() : "";
   if (det.employee_id && name && !NON_IDENTITY_LABELS.has(name.toLowerCase())) {
@@ -38,7 +38,7 @@ function faceLabelOf(det) {
     if (det.identity_source === "appearance") return `${name} (by appearance)`;
     return name;
   }
-  return det.face_bbox ? "Unknown" : GENERIC_LABEL;
+  return GENERIC_LABEL;
 }
 
 function drawDetection(ctx, det, k = 1, faceView = false) {
@@ -219,6 +219,9 @@ export default function useLiveCameraFeed(camera, { overlay = true, width, faceV
     };
   }, [camera?.id, camera?.isConfigured, camera?.feedOn, overlay, width, faceView]);
 
-  const live = status === "live" && (!faceView || flowing);
+  // "Live" means video frames are actually arriving, not just that the socket to
+  // the backend is open: an open socket with no frames (e.g. an RTMP-push camera
+  // that has not started sending) must not look live over a blank picture.
+  const live = status === "live" && flowing;
   return { canvasRef, status, live, delayed: live && delayed, noFace: live && noFace };
 }

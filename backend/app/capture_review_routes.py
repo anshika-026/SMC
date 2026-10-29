@@ -146,6 +146,11 @@ def capture_status():
             "overlay_age_seconds": round(overlay_age, 1) if overlay_age is not None else None,
             "process_ms": round(pipe.process_ms) if pipe is not None and pipe.process_ms is not None else None,
             "last_face_age_seconds": round(now - pipe.last_face_at, 1) if pipe is not None and pipe.last_face_at else None,
+            # Smoothed ms per stage (face_detect, face_cycle, person_detect, rescue,
+            # recognise) and recognition rejections by reason - for diagnosing
+            # recognition speed and misses without reading logs.
+            "stage_ms": pipe.perf_snapshot() if pipe is not None and hasattr(pipe, "perf_snapshot") else None,
+            "rejections": pipe.diag_snapshot() if pipe is not None and hasattr(pipe, "diag_snapshot") else None,
         })
     return {
         "worker": {

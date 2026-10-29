@@ -10,7 +10,7 @@ const TILE_WIDTH = 960;
 // size in CameraViewerModal — this component only owns the small preview.
 export default function LiveCameraTile({ camera, onClick, overlay = true, faceView = false }) {
   const { canvasRef, status, live, delayed, noFace } = useLiveCameraFeed(camera, { overlay, width: TILE_WIDTH, faceView });
-  const isLive = faceView ? live : status === "live";
+  const isLive = live;
 
   return (
     <button
@@ -24,7 +24,11 @@ export default function LiveCameraTile({ camera, onClick, overlay = true, faceVi
           <div className="absolute inset-0 flex items-center justify-center text-center text-white/40 text-xs">
             <div>
               <ShieldAlert size={24} className="mx-auto mb-1" />
-              {status === "connecting" ? "Connecting…" : status === "disabled" ? "Feed switched off" : "Offline"}
+              {status === "live"
+                ? camera.protocol === "rtmp_push"
+                  ? "No video from the camera yet — check its RTMP settings"
+                  : "Connected — waiting for video"
+                : status === "connecting" ? "Connecting…" : status === "disabled" ? "Feed switched off" : "Offline"}
             </div>
           </div>
         )}

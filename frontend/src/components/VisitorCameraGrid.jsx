@@ -32,7 +32,12 @@ export function CameraStatusBadges({ vc }) {
       {vc.inside_now > 0 && (
         <span className="badge badge-warning">
           <Users size={11} />
-          {vc.inside_now} inside now
+          {vc.inside_now} visitor{vc.inside_now === 1 ? "" : "s"} inside now
+        </span>
+      )}
+      {vc.zone && vc.detection_active && vc.employee_exclusion === false && (
+        <span className="badge badge-neutral" title="Face recognition is not running on this camera, so employees sitting here are alerted as visitors">
+          Employees not excluded here
         </span>
       )}
     </div>

@@ -1,0 +1,72 @@
+# SMC backend in Docker (the frontend keeps running on Windows: npm run dev).
+#
+#   1. one time:   .\scripts\docker-seed-data.ps1    (copies backend\data into the smc_data volume)
+#                  .\scripts\docker-ingest-env.ps1   (creates SMC\.env with the RTMP ingest secrets)
+#   2. any time:   docker compose up -d --build
+#   3. check:      docker compose logs -f backend      (API on http://127.0.0.1:8822)
+#
+# Why a named volume for data and not a Windows folder: the app keeps its SQLite
+# database in WAL mode, which is unreliable on a bind-mounted Windows folder. The
+# volume lives on the container's own Linux disk. It is a COPY of backend\data - the
+# Windows folder is not modified, and changes made through the containerised app
+# (new enrolments, captures) stay in the volume. See scripts\docker-seed-data.ps1 for how
+# to copy it back out.
+services:
+  backend:
+    build: ./backend
+    image: smc-backend
+    container_name: smc-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8822:8822"
+    # The camera readers hand frames to the main process through shared memory
+    # (/dev/shm); Docker's 64 MB default is smaller than four 1440p cameras need.
+    shm_size: "1gb"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8822"
+      DATA_DIR: /data
+      MODEL_DIR: /app/models
+      INSIGHTFACE_ROOT: /insightface
+      OMP_NUM_THREADS: "2"
+      # RTMP push (see backend/app/ingest.py). Values come from SMC\.env (never
+      # committed); RTMP_PUBLIC_HOST must be the address cameras can reach.
+      RTMP_PUBLIC_HOST: ${RTMP_PUBLIC_HOST:-}
+      RTMP_PUBLIC_PORT: ${RTMP_PUBLIC_PORT:-1935}
+      RTMP_PUBLIC_SCHEME: ${RTMP_PUBLIC_SCHEME:-rtmp}
+      RTMP_APP: live
+      RTMP_FULL_URL_FORMAT: ${RTMP_FULL_URL_FORMAT:-{server}/{key}}
+      INGEST_RTSP_BASE: rtsp://mediamtx:8554
+      INGEST_API_URL: http://mediamtx:9997
+      INGEST_READ_USER: smc-reader
+      INGEST_READ_PASSWORD: ${INGEST_READ_PASSWORD:?set INGEST_READ_PASSWORD in SMC/.env}
+      INGEST_HOOK_SECRET: ${INGEST_HOOK_SECRET:?set INGEST_HOOK_SECRET in SMC/.env}
+    volumes:
+      - smc_data:/data
+      - ./backend/models:/app/models:ro
+      - ./backend/.env:/app/.env:ro
+      - ${USERPROFILE}/.insightface:/insightface:ro
+
+  # RTMP ingest server for cameras that push to us. Only the RTMP port is
+  # published; its RTSP (backend reads) and API stay on the internal network.
+  # Every publish/read is decided by the backend's /api/ingest/auth.
+  mediamtx:
+    image: bluenviron/mediamtx:1.9.3
+    container_name: smc-mediamtx
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${RTMP_PUBLIC_PORT:-1935}:1935"
+    environment:
+      MTX_AUTHHTTPADDRESS: "http://backend:8822/api/ingest/auth?secret=${INGEST_HOOK_SECRET:?set INGEST_HOOK_SECRET in SMC/.env}"
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+
+volumes:
+  smc_data:
+    # Created and filled once by scripts\docker-seed-data.ps1 and holding the live
+    # data since, so compose uses it by its exact name and never creates (or
+    # removes) it itself.
+    name: smc_data
+    external: true

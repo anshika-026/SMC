@@ -5,6 +5,7 @@ import StatCard from "../components/StatCard";
 import DataTable from "../components/DataTable";
 import StatusBadge from "../components/StatusBadge";
 import Modal from "../components/Modal";
+import RtmpSetupModal from "../components/RtmpSetupModal";
 import Tabs from "../components/Tabs";
 import ToggleSwitch from "../components/ToggleSwitch";
 import * as api from "../api/client";
@@ -28,7 +29,70 @@ function healthTone(pct) {
 
 const VIEWS = ["All", "Camera Health"];
 const PURPOSES = ["General", "Theft", "Entry/Exit", "Surveillance", "Safety"];
-const EMPTY_FORM = { streamUrl: "", driveName: "", site: "", purpose: "General", code: "", attendanceTracking: true };
+const EMPTY_FORM = { protocol: "rtsp", streamUrl: "", driveName: "", site: "", purpose: "General", code: "", attendanceTracking: true };
+
+// Per-protocol wording for the stream link field.
+const SOURCE_TEXT = {
+  rtsp: {
+    label: "RTSP link",
+    placeholder: "rtsp://user:password@192.168.1.10:554/stream",
+    hint: "Paste the full link from the camera or NVR, including the login.",
+  },
+  rtmp: {
+    label: "RTMP link",
+    placeholder: "rtmp://server:1935/app/stream-key",
+    hint: "Paste the full RTMP link, including the application name and stream key.",
+  },
+};
+
+const PROTOCOL_LABELS = { rtsp: "RTSP", rtmp: "RTMP link", rtmp_push: "RTMP Push — camera streams to us" };
+
+// Shown instead of a link field when the camera pushes to us.
+function PushExplainer() {
+  return (
+    <div className="rounded-lg bg-[#f5f6fa] px-3 py-2.5 text-xs text-slate-600 space-y-1">
+      <p>
+        No link needed: when you save, this server creates a private stream key for the camera and shows the RTMP server,
+        stream key and full URL to enter in the camera.
+      </p>
+      <p>
+        The camera (or its NVR/encoder) must support RTMP push. Cameras that only offer RTSP should be added with the RTSP
+        option.
+      </p>
+    </div>
+  );
+}
+
+// RTSP / RTMP choice for the Add and Edit Camera forms.
+function ProtocolSwitch({ value, onChange }) {
+  return (
+    <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Stream protocol">
+      {api.CAMERA_PROTOCOLS.map((p) => (
+        <button
+          key={p}
+          type="button"
+          role="radio"
+          aria-checked={value === p}
+          onClick={() => onChange(p)}
+          className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${
+            value === p ? "bg-brand-500 text-white border-brand-500" : "border-border-200 text-ink-900"
+          }`}
+        >
+          {PROTOCOL_LABELS[p] || p.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// RTMP: early feedback only; the backend validates the link again.
+function describeSource(url, protocol) {
+  if (protocol === api.PUSH_PROTOCOL) return { push: true }; // nothing to type: the key is generated
+  if (protocol !== "rtmp") return describeRtsp(url);
+  if (!url.trim()) return null;
+  const p = api.parseRtmpUrl(url);
+  return p.error ? { error: p.error } : { ...p, rtmp: true };
+}
 
 // What the Add Camera form can tell from the link alone, before testing it.
 function describeRtsp(url) {
@@ -50,6 +114,8 @@ export default function CameraManagement() {
   const [view, setView] = useState("All");
   const [editing, setEditing] = useState(null);
   const [toast, setToast] = useState("");
+  // RTMP push setup screen: { id, name, initial, error } or null.
+  const [setupFor, setSetupFor] = useState(null);
 
   useEffect(() => {
     refresh();
@@ -65,7 +131,8 @@ export default function CameraManagement() {
   }
 
   const online = cameras.filter((c) => c.status === "Active").length;
-  const rtspInfo = describeRtsp(form.streamUrl);
+  const rtspInfo = describeSource(form.streamUrl, form.protocol);
+  const sourceText = SOURCE_TEXT[form.protocol] || SOURCE_TEXT.rtsp;
   const avgHealth = cameras.length
     ? Math.round(cameras.reduce((sum, c) => sum + healthForCamera(c.id), 0) / cameras.length)
     : null;
@@ -87,7 +154,7 @@ export default function CameraManagement() {
   async function runTest() {
     setTest({ state: "testing", url: "", message: "" });
     try {
-      const url = await api.testCameraStream(form.streamUrl.trim());
+      const url = await api.testCameraStream(form.streamUrl.trim(), form.protocol);
       setTest({ state: "ok", url, message: "" });
     } catch (err) {
       setTest({ state: "failed", url: "", message: err.message });
@@ -96,20 +163,26 @@ export default function CameraManagement() {
 
   async function handleAdd(e) {
     e.preventDefault();
-    const parsed = describeRtsp(form.streamUrl);
+    const parsed = describeSource(form.streamUrl, form.protocol);
     if (!parsed || parsed.error) {
-      setAddError(parsed?.error || "Paste the camera's RTSP link");
+      setAddError(parsed?.error || `Paste the camera's ${form.protocol === "rtmp" ? "RTMP" : "RTSP"} link`);
       return;
     }
     setSaving(true);
     setAddError("");
     try {
-      await api.addCamera({ ...form, streamUrl: form.streamUrl.trim() });
+      const created = await api.addCamera({ ...form, streamUrl: form.streamUrl.trim() });
       setAddOpen(false);
-      showToast(`${form.driveName} added. Open Live Feed to watch it.`);
       refresh();
-    } catch {
-      setAddError("Couldn't save the camera. Check the backend is running.");
+      if (form.protocol === api.PUSH_PROTOCOL) {
+        // Only after the backend confirmed the camera and returned its real setup.
+        setSetupFor({ id: created.id, name: created.name, initial: created.rtmp_setup, error: created.rtmp_setup_error || "" });
+      } else {
+        showToast(`${form.driveName} added. Open Live Feed to watch it.`);
+      }
+    } catch (err) {
+      // The backend explains a rejected link (never echoing it back).
+      setAddError(err?.message && !/^Request failed/i.test(err.message) ? err.message : "Couldn't save the camera. Check the backend is running.");
     } finally {
       setSaving(false);
     }
@@ -122,37 +195,70 @@ export default function CameraManagement() {
       label: cam.label,
       purpose: cam.purpose || "General",
       site: cam.site,
-      streamUrl: api.buildRtspUrl({
-        user: cam.user,
-        password: "",
-        host: cam.host,
-        port: cam.port,
-        streamPath: cam.streamPath,
-      }),
+      protocol: cam.protocol || "rtsp",
+      sourceUrlSet: cam.sourceUrlSet,
+      rtmpKeySet: cam.rtmpKeySet,
+      sourceDisplay: cam.sourceDisplay,
+      // An RTMP link is never sent to the browser: the field starts blank and
+      // blank means "keep the saved link".
+      streamUrl:
+        cam.protocol === "rtmp"
+          ? ""
+          : api.buildRtspUrl({
+              user: cam.user,
+              password: "",
+              host: cam.host,
+              port: cam.port,
+              streamPath: cam.streamPath,
+            }),
       attendanceTracking: cam.attendanceTracking,
+      error: "",
     });
   }
 
   async function handleEditSubmit(e) {
     e.preventDefault();
-    const parsed = api.parseRtspUrl(editing.streamUrl);
-    const payload = {
+    const common = {
       name: editing.label,
       cam_code: editing.camCode,
       purpose: editing.purpose,
       site: editing.site,
-      host: parsed.host,
-      port: parsed.port,
-      user: parsed.user,
-      stream_path: parsed.streamPath,
       attendance_tracking: editing.attendanceTracking,
     };
-    // Password is never sent to the frontend, so the field only ever shows
-    // it blank — only overwrite the stored password if the user actually
-    // typed a new one into the URL.
-    if (parsed.password) payload.password = parsed.password;
+    let payload;
+    if (editing.protocol === api.PUSH_PROTOCOL) {
+      payload = { ...common, protocol: api.PUSH_PROTOCOL }; // the backend keeps (or creates) the key
+    } else if (editing.protocol === "rtmp") {
+      const typed = editing.streamUrl.trim();
+      if (typed) {
+        const check = api.parseRtmpUrl(typed);
+        if (check.error) return setEditing((f) => ({ ...f, error: check.error }));
+      } else if (!editing.sourceUrlSet) {
+        return setEditing((f) => ({ ...f, error: "Enter the RTMP link, for example rtmp://host/app/stream-key" }));
+      }
+      // Blank = keep the saved link (it is never shown here).
+      payload = { ...common, protocol: "rtmp", ...(typed && { source_url: typed }) };
+    } else {
+      const parsed = api.parseRtspUrl(editing.streamUrl);
+      payload = {
+        ...common,
+        protocol: "rtsp",
+        host: parsed.host,
+        port: parsed.port,
+        user: parsed.user,
+        stream_path: parsed.streamPath,
+      };
+      // Password is never sent to the frontend, so the field only ever shows
+      // it blank — only overwrite the stored password if the user actually
+      // typed a new one into the URL.
+      if (parsed.password) payload.password = parsed.password;
+    }
 
-    await api.updateCamera(editing.id, payload);
+    try {
+      await api.updateCamera(editing.id, payload);
+    } catch (err) {
+      return setEditing((f) => ({ ...f, error: err?.message || "Couldn't save the camera." }));
+    }
     setEditing(null);
     showToast("Camera updated");
     refresh();
@@ -286,8 +392,21 @@ export default function CameraManagement() {
       <Modal open={addOpen} onClose={() => setAddOpen(false)} title="Add Camera" width="max-w-lg">
         <form onSubmit={handleAdd} className="space-y-4">
           <div>
+            <p className="text-sm font-medium text-ink-900 mb-1.5">Stream protocol</p>
+            <ProtocolSwitch
+              value={form.protocol}
+              onChange={(p) => {
+                setForm((f) => ({ ...f, protocol: p, streamUrl: "" }));
+                setTest({ state: "idle", url: "", message: "" });
+                setAddError("");
+              }}
+            />
+          </div>
+          {form.protocol === api.PUSH_PROTOCOL && <PushExplainer />}
+          {form.protocol !== api.PUSH_PROTOCOL && (
+          <div>
             <label htmlFor="add-rtsp" className="text-sm font-medium text-ink-900 block mb-1.5">
-              RTSP link <span className="text-danger-500">*</span>
+              {sourceText.label} <span className="text-danger-500">*</span>
             </label>
             <div className="flex gap-2">
               <input
@@ -299,7 +418,9 @@ export default function CameraManagement() {
                   setForm((f) => ({ ...f, streamUrl: e.target.value }));
                   setTest({ state: "idle", url: "", message: "" });
                 }}
-                placeholder="rtsp://user:password@192.168.1.10:554/stream"
+                placeholder={sourceText.placeholder}
+                autoComplete="off"
+                spellCheck={false}
                 className="input-field font-mono text-xs flex-1"
               />
               <button
@@ -311,11 +432,14 @@ export default function CameraManagement() {
                 {test.state === "testing" ? "Testing…" : "Test"}
               </button>
             </div>
-            {!rtspInfo && (
-              <p className="text-xs text-slate-400 mt-1.5">Paste the full link from the camera or NVR, including the login.</p>
-            )}
+            {!rtspInfo && <p className="text-xs text-slate-400 mt-1.5">{sourceText.hint}</p>}
             {rtspInfo?.error && <p className="text-xs text-danger-500 mt-1.5">{rtspInfo.error}</p>}
-            {rtspInfo && !rtspInfo.error && (
+            {rtspInfo && !rtspInfo.error && rtspInfo.rtmp && (
+              <p className="text-xs text-slate-500 mt-1.5">
+                Server <span className="font-mono">{rtspInfo.host}:{rtspInfo.port}</span> · stream key kept private
+              </p>
+            )}
+            {rtspInfo && !rtspInfo.error && !rtspInfo.rtmp && (
               <p className="text-xs text-slate-500 mt-1.5">
                 Camera <span className="font-mono">{rtspInfo.host}:{rtspInfo.port}</span>
                 {rtspInfo.user && (
@@ -335,6 +459,7 @@ export default function CameraManagement() {
             )}
             {test.state === "failed" && <p className="text-xs text-danger-500 mt-1.5">{test.message}</p>}
           </div>
+          )}
 
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -498,20 +623,64 @@ export default function CameraManagement() {
 
             <div className="pt-1">
               <p className="text-sm font-semibold text-ink-900 mb-3">Stream Configuration</p>
+              <div className="mb-3">
+                <ProtocolSwitch
+                  value={editing.protocol}
+                  onChange={(p) =>
+                    setEditing((f) => {
+                      // Back to RTSP on an RTSP camera restores its saved address
+                      // (password blank as always); otherwise the field starts empty.
+                      const saved = cameras.find((c) => c.id === f.id);
+                      const rtspUrl =
+                        saved && saved.protocol === "rtsp"
+                          ? api.buildRtspUrl({ user: saved.user, password: "", host: saved.host, port: saved.port, streamPath: saved.streamPath })
+                          : "";
+                      return { ...f, protocol: p, error: "", streamUrl: p === "rtsp" ? rtspUrl : "" };
+                    })
+                  }
+                />
+              </div>
+              {editing.protocol === api.PUSH_PROTOCOL &&
+                (editing.rtmpKeySet && cameras.find((c) => c.id === editing.id)?.protocol === api.PUSH_PROTOCOL ? (
+                  <button
+                    type="button"
+                    className="btn-secondary text-sm"
+                    onClick={() => setSetupFor({ id: editing.id, name: editing.label, initial: null, error: "" })}
+                  >
+                    Show RTMP setup (server, stream key, full URL)
+                  </button>
+                ) : (
+                  <PushExplainer />
+                ))}
+              {editing.protocol !== api.PUSH_PROTOCOL && (
+              <>
               <label className="text-sm font-medium text-ink-900 block mb-1.5">
-                Stream URL <span className="text-danger-500">*</span>
+                {editing.protocol === "rtmp" ? "RTMP link" : "Stream URL"}{" "}
+                {!(editing.protocol === "rtmp" && editing.sourceUrlSet) && <span className="text-danger-500">*</span>}
               </label>
               <input
-                required
+                required={!(editing.protocol === "rtmp" && editing.sourceUrlSet)}
                 value={editing.streamUrl}
-                onChange={(e) => setEditing((f) => ({ ...f, streamUrl: e.target.value }))}
-                placeholder="rtsp://user:password@host:port/path"
+                onChange={(e) => setEditing((f) => ({ ...f, streamUrl: e.target.value, error: "" }))}
+                placeholder={
+                  editing.protocol === "rtmp"
+                    ? editing.sourceDisplay || SOURCE_TEXT.rtmp.placeholder
+                    : "rtsp://user:password@host:port/path"
+                }
+                autoComplete="off"
+                spellCheck={false}
                 className="input-field font-mono text-xs"
               />
               <p className="text-xs text-slate-400 mt-1.5">
-                The saved password is hidden for security and shown blank here. Leave it blank
-                to keep the current password, or type the full URL with a new password to change it.
+                {editing.protocol === "rtmp"
+                  ? editing.sourceUrlSet
+                    ? "The saved RTMP link (with its stream key) is hidden for security. Leave this blank to keep it, or paste a new link to replace it."
+                    : SOURCE_TEXT.rtmp.hint
+                  : "The saved password is hidden for security and shown blank here. Leave it blank to keep the current password, or type the full URL with a new password to change it."}
               </p>
+              </>
+              )}
+              {editing.error && <p className="text-xs text-danger-500 mt-1.5">{editing.error}</p>}
             </div>
 
             {featureOn("face_recognition") && (
@@ -542,6 +711,17 @@ export default function CameraManagement() {
           </form>
         )}
       </Modal>
+
+      {setupFor && (
+        <RtmpSetupModal
+          open
+          cameraId={setupFor.id}
+          cameraName={setupFor.name}
+          initial={setupFor.initial}
+          initialError={setupFor.error}
+          onClose={() => setSetupFor(null)}
+        />
+      )}
     </div>
   );
 }

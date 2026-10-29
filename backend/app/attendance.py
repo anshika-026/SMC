@@ -36,8 +36,13 @@ ATTENDANCE_ON_SITE_MINUTES = float(os.environ.get("ATTENDANCE_ON_SITE_MINUTES", 
 # write at most one update per this many seconds (the first of the day is
 # always written immediately).
 WRITE_EVERY_SECONDS = 20
+# A person seen again on the same camera within this gap is the same
+# recognition event (face_recognition_events).
+RECOGNITION_EVENT_GAP_SECONDS = float(os.environ.get("RECOGNITION_EVENT_GAP_SECONDS", "600"))
 
 _last_write: dict[str, float] = {}
+# "employee|camera" -> [event row id, last_seen, last time the row was written]
+_open_events: dict[str, list] = {}
 _lock = threading.Lock()
 
 
@@ -76,6 +81,24 @@ def init_db() -> None:
             )
             """
         )
+        # Face Recognition report history: one row per RECOGNITION EVENT, i.e.
+        # one person seen on one camera; sightings closer together than
+        # RECOGNITION_EVENT_GAP_SECONDS extend the same row, so a person standing
+        # in front of a camera is one event, not one per frame. No images.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_recognition_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id TEXT NOT NULL,
+                camera_id INTEGER,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                sightings INTEGER NOT NULL DEFAULT 1,
+                best_confidence REAL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_face_recognition_events_ts ON face_recognition_events (first_seen)")
 
 
 def _day(ts: float) -> str:
@@ -89,6 +112,10 @@ def record(employee_id: str, camera_id: int, confidence: float, ts: float | None
     if employee_directory.get_employee(employee_id) is None:
         return False  # not a known employee — nothing to mark
     ts = ts if ts is not None else time.time()
+    try:
+        _log_recognition(employee_id, camera_id, confidence, ts)
+    except sqlite3.Error:
+        pass  # report history must never stop attendance
     day = _day(ts)
     key = f"{employee_id}|{day}"
     with _lock:
@@ -116,6 +143,38 @@ def record(employee_id: str, camera_id: int, confidence: float, ts: float | None
 
         alerts.late_arrival(employee_id, employee_directory.get_employee(employee_id)["name"], camera_id, ts)
     return True
+
+
+def _log_recognition(employee_id: str, camera_id: int, confidence: float, ts: float) -> None:
+    """Extends this person's open recognition event on this camera, or starts
+    a new one after a gap. The row is rewritten at most every
+    WRITE_EVERY_SECONDS, so the recognition loop is not slowed by it."""
+    key = f"{employee_id}|{camera_id}"
+    with _lock:
+        ev = _open_events.get(key)
+        if ev is not None and ts - ev[1] <= RECOGNITION_EVENT_GAP_SECONDS:
+            ev[1] = ts
+            if ts - ev[2] < WRITE_EVERY_SECONDS:
+                return
+            ev[2] = ts
+            row_id = ev[0]
+        else:
+            row_id = None
+    with _conn() as conn:
+        if row_id is not None:
+            conn.execute(
+                "UPDATE face_recognition_events SET last_seen = MAX(last_seen, ?), sightings = sightings + 1, "
+                "best_confidence = MAX(COALESCE(best_confidence, 0), ?) WHERE id = ?",
+                (ts, confidence, row_id),
+            )
+            return
+        cur = conn.execute(
+            "INSERT INTO face_recognition_events (employee_id, camera_id, first_seen, last_seen, sightings, best_confidence) "
+            "VALUES (?, ?, ?, ?, 1, ?)",
+            (employee_id, camera_id, ts, ts, confidence),
+        )
+    with _lock:
+        _open_events[key] = [cur.lastrowid, ts, ts]
 
 
 def add_leave(employee_id: str, day_from: str, day_to: str, reason: str) -> dict:

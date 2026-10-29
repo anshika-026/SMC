@@ -38,10 +38,12 @@ Model files:
 
 import logging
 import os
+import queue
 import shutil
 import time
 import uuid
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -400,7 +402,36 @@ EXPRESSION_INTERVAL_FRAMES = int(os.environ.get("EXPRESSION_INTERVAL_FRAMES", "6
 # a track the moment a new one supersedes it. This stays a bounded value
 # rather than "forever" so a track that somehow drifts cannot keep a stale
 # name indefinitely.
-IDENTITY_GRACE_SECONDS = float(os.environ.get("IDENTITY_GRACE_SECONDS", "30"))
+# A name belongs to the person TRACK, not to the last frame a face was readable:
+# someone who turns their back, bends over a desk or is hidden behind a monitor
+# keeps their name for as long as the track lives (PERSON_TRACK_MAX_SECONDS ends
+# it when they really leave). This is only an upper bound for a track that
+# somehow never ends. Was 30 s, which turned a recognised person back into
+# "Person" half a minute after their face last faced the camera.
+IDENTITY_GRACE_SECONDS = float(os.environ.get("IDENTITY_GRACE_SECONDS", "600"))
+
+# Overlay boxes are smoothed (exponential average towards each new detection),
+# and a person who is between detections is moved on along their recent
+# velocity for at most PERSON_PREDICT_MAX_SECONDS (damped), so boxes glide
+# instead of jumping or freezing while the detector is busy.
+# A box is dropped PERSON_TRACK_MAX_SECONDS after the person was last detected - or,
+# when this machine is slow and the detector only comes round every few seconds,
+# 2.5 detector cycles later (never more than PERSON_TRACK_MAX_HOLD_SECONDS), so a
+# slow cycle does not look like the person leaving.
+PERSON_TRACK_MAX_HOLD_SECONDS = float(os.environ.get("PERSON_TRACK_MAX_HOLD_SECONDS", "15"))
+# Face detections are produced by their own worker; the person loop uses the latest
+# ones if they are at most this old (and crops the face from the frame it was found in).
+FACE_RESULT_MAX_AGE = float(os.environ.get("FACE_RESULT_MAX_AGE", "4"))
+PERSON_BOX_SMOOTHING = float(os.environ.get("PERSON_BOX_SMOOTHING", "0.6"))
+PERSON_PREDICT_MAX_SECONDS = float(os.environ.get("PERSON_PREDICT_MAX_SECONDS", "1.0"))
+
+# The slow rescue model runs in its own thread; its result describes the frame it
+# was given, so it is only used if it is still this recent when it finishes.
+PERSON_RESCUE_RESULT_MAX_AGE = float(os.environ.get("PERSON_RESCUE_RESULT_MAX_AGE", "5"))
+
+# Face recognition work waiting for the recognition worker (per camera). Full
+# queue = the newest work for that person is skipped, never accumulated.
+RECOGNITION_QUEUE_SIZE = int(os.environ.get("FACE_RECOGNITION_QUEUE_SIZE", "6"))
 
 # How long a person's face box is kept on the live viewer after the face was last found.
 FACE_BOX_HOLD_SECONDS = float(os.environ.get("FACE_BOX_HOLD_SECONDS", "1.5"))
@@ -418,6 +449,22 @@ RECOGNITION_STABILITY_FRAMES = int(os.environ.get("RECOGNITION_STABILITY_FRAMES"
 # as the two-vote path. Reads between CLASSIFIER_MIN_PROBA and this still
 # need the vote.
 INSTANT_COMMIT_PROBA = float(os.environ.get("INSTANT_COMMIT_PROBA", "0.9"))
+
+# The same shortcut for an enrolled-gallery match (cosine similarity, not a
+# probability): one read this strong and this far ahead of the next person names
+# the track at once. Measured on this install's labelled CCTV captures, the best
+# match to a DIFFERENT person stayed under ~0.29 (p95), so 0.5 with a 0.15 lead is
+# far outside what a wrong person scores. Each recognition costs seconds on this
+# CPU; needing two reads per person was what left most people of a busy room
+# unnamed. Weaker matches still need the RECOGNITION_STABILITY_FRAMES vote.
+INSTANT_COMMIT_SIMILARITY = float(os.environ.get("INSTANT_COMMIT_SIMILARITY", "0.5"))
+INSTANT_COMMIT_MARGIN = float(os.environ.get("INSTANT_COMMIT_MARGIN", "0.15"))
+
+# Detector input size when re-finding the face inside a small face crop (live
+# recognition). The full 640x640 is meant for whole photos; a crop is ~100 px and
+# mostly face, so a smaller input finds the same face and landmarks for a
+# fraction of the work (measured, see the report). Enrolment photos keep 640.
+FACE_EMBED_DET_SIZE = int(os.environ.get("FACE_EMBED_DET_SIZE", "256"))
 
 # Identity hand-off by body appearance (appearance.py): a person with no
 # face identity is compared, at most every APPEARANCE_INTERVAL_SECONDS and for
@@ -486,6 +533,13 @@ class PersonTrackState:
     # live viewer's face boxes. Held briefly so the box doesn't flicker.
     face_bbox: tuple[int, int, int, int] | None = None
     face_time: float = 0.0
+    # Smoothed box + centre velocity (px/s) used for display; bbox above stays
+    # the raw detection that face association and appearance use.
+    disp_box: tuple[float, float, float, float] | None = None
+    vel: tuple[float, float] = (0.0, 0.0)
+    first_seen_time: float = 0.0
+    # A recognition job for this person is already queued/running.
+    recog_inflight: bool = False
 
 
 class CameraFacePipeline:
@@ -512,6 +566,26 @@ class CameraFacePipeline:
         # PERSON_DETECT_INTERVAL_FRAMES after this pipeline is created.
         self._last_person_detect_frame = -PERSON_DETECT_INTERVAL_FRAMES
         self._last_rescue_frame = -PERSON_RESCUE_INTERVAL_FRAMES
+        # Recognition (embedding + match) and the slow rescue detector run on
+        # their own bounded workers so a busy face or a heavy sweep can never
+        # stall the person cycle that keeps boxes alive. See close().
+        self._recog_queue: queue.Queue = queue.Queue(maxsize=RECOGNITION_QUEUE_SIZE)
+        self._recog_thread = threading.Thread(
+            target=self._recog_worker, name=f"recog-cam{camera_id}", daemon=True)
+        self._recog_thread.start()
+        self._rescue_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"rescue-cam{camera_id}")
+        self._rescue_future = None
+        self.stage_ms: dict[str, float] = {}
+        self._cycle_s = 0.0
+        # Face detection + face tracking + dataset capture run on their own worker:
+        # feed_frame() hands over the newest frame and carries on with the people.
+        self._face_slot = None
+        self._face_event = threading.Event()
+        self._face_closed = False
+        self._face_error: Exception | None = None
+        self._faces_latest = None            # (detections, time, frame they came from)
+        self._face_thread = threading.Thread(target=self._face_worker, name=f"faces-cam{camera_id}", daemon=True)
+        self._face_thread.start()
         self._gallery_cache: list[dict] = []
         self._gallery_loaded_at = 0.0
         self._gallery_index = face_matching.build_index([])
@@ -621,10 +695,17 @@ class CameraFacePipeline:
         """All four models — needed for the live per-camera pipeline
         (face detect + track + embed, plus person detect + rescue for the
         overlay), unlike enrollment which only needs ArcFace."""
+        first = cls._arcface is None
         cls._ensure_yolo_loaded()
         cls._ensure_yolo_person_loaded()
         cls._ensure_yolo_person_rescue_loaded()
         cls._ensure_arcface_loaded()
+        if first:
+            # The models are loaded for the rest of the run: keep the garbage
+            # collector from re-scanning them (see heap.py).
+            from app import heap
+
+            heap.freeze("face models loaded")
 
     def _refresh_gallery(self):
         # Reload the enrolled embeddings every 30s rather than per-frame.
@@ -717,12 +798,71 @@ class CameraFacePipeline:
         self._last_sample_time = now
         self.frame_idx += 1
 
+        # Face detection / face tracking / dataset capture happen on the face worker
+        # (_process_faces); this thread only hands it the newest frame and moves on
+        # to the people, which must never wait for a face. Without a worker (tests)
+        # the same work runs inline.
+        err = self.__dict__.get("_face_error")
+        if err is not None:
+            self._face_error = None
+            raise err                      # surfaces in camera_stream's face_health (pause / rebuild)
+        if self.__dict__.get("_face_thread") is None:
+            detections, face_frame = self._process_faces(frame), frame
+        else:
+            self._face_slot = frame        # latest frame wins; nothing queues up
+            self._face_event.set()
+            detections, face_frame = self._recent_faces(frame)
+
+        # --- Person-first live overlay: entirely separate track space and
+        # display logic. Reuses this same frame's face detections (above)
+        # for identity, but a person's box/existence never depends on one
+        # being found. Skipped while nobody is watching — see has_viewer
+        # docstring above. person_tracks is left as-is (not cleared) while
+        # skipped; frame_idx keeps advancing underneath it, so on the next
+        # real frame every existing track reads as long-stale and is
+        # dropped cleanly rather than reappearing with a stale box. ---
+        if has_viewer and self.frame_idx - self._last_person_detect_frame >= PERSON_DETECT_INTERVAL_FRAMES:
+            self._last_person_detect_frame = self.frame_idx
+            self._update_person_overlay(frame, detections, face_frame)
+
+    def _recent_faces(self, frame: np.ndarray):
+        """Latest face detections (and the frame they came from) if still fresh."""
+        latest = self.__dict__.get("_faces_latest")
+        if latest is None or time.time() - latest[1] > FACE_RESULT_MAX_AGE:
+            return np.empty((0, 5), dtype=np.float32), frame
+        return latest[0], latest[2]
+
+    def _face_worker(self) -> None:
+        while True:
+            self._face_event.wait()
+            self._face_event.clear()
+            if self._face_closed:
+                return
+            frame, self._face_slot = self._face_slot, None
+            if frame is None:
+                continue
+            started = time.perf_counter()
+            try:
+                dets = self._process_faces(frame)
+                self._faces_latest = (dets, time.time(), frame)
+            except Exception as e:                 # reported by the next feed_frame()
+                log.exception("camera %s: face worker failed", self.camera_id)
+                self._face_error = e
+            finally:
+                self._tick("face_cycle", started)
+
+    def _process_faces(self, frame: np.ndarray) -> np.ndarray:
+        """Face detection, face tracking and the training-capture/review flow for
+        one frame (unchanged logic, moved off the person loop). Returns the raw
+        face detections, which the person overlay uses to find faces inside people."""
         # --- Face detection + face tracking: UNCHANGED from before the
         # person-first overlay existed. Feeds ONLY the training-capture /
         # review pipeline below (_recognize_and_route / _save_training_capture)
         # — the live-view overlay no longer reads from this at all (see
         # _update_person_overlay). ---
+        _t = time.perf_counter()
         detections = self._detect_faces(frame)  # -> np.array [[x1,y1,x2,y2,conf], ...]
+        self._tick("face_detect", _t)
         if len(detections):
             sv_detections = sv.Detections(xyxy=detections[:, :4], confidence=detections[:, 4])
             tracked = self.tracker.update_with_detections(sv_detections)
@@ -775,17 +915,7 @@ class CameraFacePipeline:
             if state.best_crop is not None and not state.pushed_to_review:
                 self._recognize_and_route(state)
 
-        # --- Person-first live overlay: entirely separate track space and
-        # display logic. Reuses this same frame's face detections (above)
-        # for identity, but a person's box/existence never depends on one
-        # being found. Skipped while nobody is watching — see has_viewer
-        # docstring above. person_tracks is left as-is (not cleared) while
-        # skipped; frame_idx keeps advancing underneath it, so on the next
-        # real frame every existing track reads as long-stale and is
-        # dropped cleanly rather than reappearing with a stale box. ---
-        if has_viewer and self.frame_idx - self._last_person_detect_frame >= PERSON_DETECT_INTERVAL_FRAMES:
-            self._last_person_detect_frame = self.frame_idx
-            self._update_person_overlay(frame, detections)
+        return detections
 
     def _detect_faces(self, frame: np.ndarray) -> np.ndarray:
         results = self._yolo.predict(frame, verbose=False, conf=0.5)[0]
@@ -831,6 +961,67 @@ class CameraFacePipeline:
             frame, verbose=False, conf=PERSON_DETECT_CONF, classes=[0], imgsz=PERSON_DETECT_IMGSZ,
         )[0]
         return self._filter_person_boxes(results)
+
+    def _run_rescue(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
+        started = time.perf_counter()
+        t_frame = time.time()
+        dets = self._detect_persons_rescue(frame)
+        self._tick("rescue", started)
+        return dets, t_frame
+
+    def _collect_rescue(self, frame: np.ndarray) -> np.ndarray:
+        """Boxes from the slow rescue model for this cycle, never waiting for it.
+
+        The sweep runs on its own thread (one at a time); a finished result is
+        used if it is still recent, and boxes that overlap a person already on
+        screen are dropped so a late result cannot duplicate or move anybody.
+        A new sweep starts when one is due and none is running. Without a
+        worker (tests) it runs inline as it used to."""
+        empty = np.empty((0, 5), dtype=np.float32)
+        pool = self.__dict__.get("_rescue_pool")
+        due = self.frame_idx - self._last_rescue_frame >= PERSON_RESCUE_INTERVAL_FRAMES
+        if pool is None:
+            if not due:
+                return empty
+            self._last_rescue_frame = self.frame_idx
+            return self._detect_persons_rescue(frame)
+        out = empty
+        fut = self.__dict__.get("_rescue_future")
+        if fut is not None and fut.done():
+            self._rescue_future = None
+            try:
+                dets, t_frame = fut.result()
+            except Exception:
+                log.exception("camera %s: rescue person sweep failed", self.camera_id)
+                dets, t_frame = empty, 0.0
+            if len(dets) and time.time() - t_frame <= PERSON_RESCUE_RESULT_MAX_AGE:
+                shown = [np.array(p.bbox, dtype=np.float32) for p in self.person_tracks.values()
+                         if time.time() - p.last_seen_time <= self._track_hold()]
+                keep = [d for d in dets
+                        if not shown or max(self._iou(d, b) for b in shown) < PERSON_RESCUE_DEDUP_IOU]
+                if keep:
+                    out = np.array(keep, dtype=np.float32)
+        if self.__dict__.get("_rescue_future") is None and due:
+            self._last_rescue_frame = self.frame_idx
+            self._rescue_future = pool.submit(self._run_rescue, frame)
+        return out
+
+    @staticmethod
+    def _person_tracker_scores(conf: np.ndarray) -> np.ndarray:
+        """Scores handed to the person ByteTrack, not the raw detector scores.
+
+        ByteTrack only STARTS a track for a detection scoring above its
+        track_activation_threshold + 0.1 (0.5 here), so a person the detector
+        reports at 0.3-0.5 - exactly the seated / half-hidden people
+        PERSON_DETECT_CONF was lowered to catch - was accepted by the detector
+        and then silently never shown (tested: 0.45 -> no track, 0.51 -> track;
+        and lowering the threshold alone only makes such tracks flicker). The
+        detector has already applied PERSON_DETECT_CONF and MIN_PERSON_BOX_AREA,
+        so the tracker does not need to re-filter by score: map [PERSON_DETECT_CONF,
+        1] monotonically onto [0.6, 1.0] so every accepted detection can be tracked
+        and the ordering the tracker uses to match boxes is unchanged."""
+        c = np.clip(np.asarray(conf, dtype=np.float32), PERSON_DETECT_CONF, 1.0)
+        return 0.6 + (c - PERSON_DETECT_CONF) / max(1.0 - PERSON_DETECT_CONF, 1e-6) * 0.4
 
     @staticmethod
     def _iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
@@ -889,19 +1080,21 @@ class CameraFacePipeline:
                     break
         return assignments
 
-    def _update_person_overlay(self, frame: np.ndarray, face_detections: np.ndarray) -> None:
+    def _track_hold(self) -> float:
+        """Seconds a person stays on screen after the detector last saw them."""
+        return max(PERSON_TRACK_MAX_SECONDS, min(PERSON_TRACK_MAX_HOLD_SECONDS, 2.5 * self.__dict__.get("_cycle_s", 0.0)))
+
+    def _update_person_overlay(self, frame: np.ndarray, face_detections: np.ndarray, face_frame: np.ndarray | None = None) -> None:
         """Person-first: detect + track bodies unconditionally, then for
         each currently-visible person track, try to find a face inside its
         box and (throttled) refresh its temporally-stabilized identity. A
         person's box is shown regardless of whether a face is found — see
         module-level PersonTrackState docstring for the stability/grace
         rules that decide what label goes with it."""
+        _t = time.perf_counter()
         person_dets = self._detect_persons(frame)
-
-        if self.frame_idx - self._last_rescue_frame >= PERSON_RESCUE_INTERVAL_FRAMES:
-            self._last_rescue_frame = self.frame_idx
-            rescue_dets = self._detect_persons_rescue(frame)
-            person_dets = self._merge_rescue_detections(person_dets, rescue_dets)
+        self._tick("person_detect", _t)
+        person_dets = self._merge_rescue_detections(person_dets, self._collect_rescue(frame))
 
         # Always call update_with_detections, even with zero detections —
         # ByteTrack still needs every frame to age its internal state
@@ -915,7 +1108,7 @@ class CameraFacePipeline:
         # kept until it's truly gone for PERSON_TRACK_MAX_AGE frames), not
         # from this frame's raw tracker output alone.
         if len(person_dets):
-            sv_persons = sv.Detections(xyxy=person_dets[:, :4], confidence=person_dets[:, 4])
+            sv_persons = sv.Detections(xyxy=person_dets[:, :4], confidence=self._person_tracker_scores(person_dets[:, 4]))
             tracked_persons = self.person_tracker.update_with_detections(sv_persons)
         else:
             tracked_persons = self.person_tracker.update_with_detections(sv.Detections.empty())
@@ -940,18 +1133,39 @@ class CameraFacePipeline:
         # just appeared for the first time; two people simultaneously
         # matched this same frame are never touched here.
         new_track_ids = [tid for tid in track_ids_this_frame if tid not in self.person_tracks]
+        handed_over: dict[int, PersonTrackState] = {}
         if new_track_ids:
             coasting_ids = [tid for tid in self.person_tracks if tid not in seen_this_frame]
             for new_tid in new_track_ids:
                 new_box = np.array(seen_this_frame[new_tid], dtype=np.float32)
                 for old_tid in coasting_ids:
                     if self._iou(new_box, np.array(self.person_tracks[old_tid].bbox, dtype=np.float32)) >= PERSON_TRACK_HANDOFF_IOU:
+                        # Same person under a new track id: the old track's name
+                        # (and smoothed box) move to the new one instead of being
+                        # thrown away and re-earned from scratch.
+                        handed_over[new_tid] = self.person_tracks[old_tid]
                         del self.person_tracks[old_tid]
                         coasting_ids.remove(old_tid)
                         break
 
         for idx, track_id in enumerate(track_ids_this_frame):
+            fresh = track_id not in self.person_tracks
             pstate = self.person_tracks.setdefault(track_id, PersonTrackState(track_id=track_id))
+            if fresh:
+                pstate.first_seen_time = time.time()
+                old = handed_over.get(track_id)
+                if old is not None:
+                    pstate.current_identity = old.current_identity
+                    pstate.identity_confidence = old.identity_confidence
+                    pstate.last_recognized_time = old.last_recognized_time
+                    pstate.appearance_identity = old.appearance_identity
+                    pstate.appearance_confidence = old.appearance_confidence
+                    pstate.appearance_time = old.appearance_time
+                    pstate.face_bbox, pstate.face_time = old.face_bbox, old.face_time
+                    pstate.disp_box, pstate.vel = old.disp_box, old.vel
+                    pstate.first_seen_time = old.first_seen_time or pstate.first_seen_time
+                self._diag_event("track_new", track=track_id, handed_over=old is not None)
+            self._smooth_box(pstate, boxes_this_frame[idx], time.time())
             pstate.bbox = boxes_this_frame[idx]
             pstate.last_seen_frame = self.frame_idx
             pstate.last_seen_time = time.time()
@@ -960,16 +1174,17 @@ class CameraFacePipeline:
                 pstate.face_bbox = tuple(int(v) for v in face_row[:4])
                 pstate.face_time = time.time()
                 self.last_face_at = pstate.face_time
-                self._update_person_identity(pstate, frame, face_row)
+                self._update_person_identity(pstate, face_frame if face_frame is not None else frame, face_row, frame)
 
         self._update_appearance_identities(frame, track_ids_this_frame)
 
         now = time.time()
+        hold = self._track_hold()
         live_this_frame = []
         stale_persons = []
         for track_id, pstate in self.person_tracks.items():
             if (self.frame_idx - pstate.last_seen_frame > PERSON_TRACK_MAX_AGE
-                    or (pstate.last_seen_time and now - pstate.last_seen_time > PERSON_TRACK_MAX_SECONDS)):
+                    or (pstate.last_seen_time and now - pstate.last_seen_time > hold)):
                 stale_persons.append(track_id)
                 continue
 
@@ -1009,6 +1224,10 @@ class CameraFacePipeline:
                 "identity_source": identity_source,  # face | appearance | None
                 "expression": expr,
                 "expression_confidence": expr_conf,
+                # display-time inputs for get_live_detections (stripped there)
+                "_disp": pstate.disp_box or tuple(float(v) for v in pstate.bbox),
+                "_vel": pstate.vel,
+                "_last_seen": pstate.last_seen_time,
             })
 
         # Replaced wholesale each frame (not merged) — a person who's
@@ -1017,14 +1236,21 @@ class CameraFacePipeline:
         # showing at their last known position regardless of this frame's
         # raw detection result (see comment above).
         self._live_detections = live_this_frame
-        self.last_overlay_at = time.time()
+        done = time.time()
+        if self.last_overlay_at:                       # smoothed time between detector cycles
+            gap = done - self.last_overlay_at
+            self._cycle_s = gap if not self.__dict__.get("_cycle_s") else 0.7 * self._cycle_s + 0.3 * gap
+        self.last_overlay_at = done
 
         for tid in stale_persons:
-            self.person_tracks.pop(tid)
+            gone = self.person_tracks.pop(tid)
+            self._diag_event("track_lost", track=tid, lived_s=round(now - (gone.first_seen_time or now), 1),
+                             named=gone.current_identity is not None)
             # Don't let expression results accumulate for tracks that are gone.
             expression.service.forget(self.camera_id, tid)
 
-    def _update_person_identity(self, pstate: PersonTrackState, frame: np.ndarray, face_row: np.ndarray) -> None:
+    def _update_person_identity(self, pstate: PersonTrackState, frame: np.ndarray, face_row: np.ndarray,
+                                body_frame: np.ndarray | None = None) -> None:
         """Throttled (LIVE_CLASSIFY_INTERVAL_FRAMES) classifier read on the
         face found inside this person's box, with a stability vote before
         committing/switching pstate.current_identity — see PersonTrackState
@@ -1057,6 +1283,27 @@ class CameraFacePipeline:
             pstate.last_expression_frame = self.frame_idx
             expression.service.submit(self.camera_id, pstate.track_id, crop)
 
+        job = (pstate, frame, crop, face_row, body_frame)
+        q = self.__dict__.get("_recog_queue")
+        if q is None:                       # no worker (tests): same work, inline
+            self._recognize_face(*job)
+            return
+        if pstate.recog_inflight:           # this person's last job has not finished
+            return
+        pstate.recog_inflight = True
+        try:
+            q.put_nowait(job)
+        except queue.Full:                  # bounded: newest work is skipped, never piled up
+            pstate.recog_inflight = False
+
+    def _recognize_face(self, pstate: PersonTrackState, frame: np.ndarray, crop: np.ndarray, face_row: np.ndarray,
+                        body_frame: np.ndarray | None = None) -> None:
+        """Embedding + identity match + stability vote for one face. Runs on the
+        recognition worker (or inline without one); only ever touches the
+        person's identity fields, never their box or existence."""
+        fx1, fy1, fx2, fy2, _fconf = face_row
+        fx1, fy1, fx2, fy2 = map(lambda v: max(0, int(v)), (fx1, fy1, fx2, fy2))
+        px1, py1, px2, py2 = self._pad_bbox(fx1, fy1, fx2, fy2, frame.shape)
         embedding = self._embed(crop)
         if embedding is None and FACE_EMBED_RETRY and time.time() - pstate.last_embed_retry >= FACE_EMBED_RETRY_SECONDS:
             pstate.last_embed_retry = time.time()
@@ -1095,7 +1342,7 @@ class CameraFacePipeline:
             # and confidence, no need to re-run the stability vote.
             pstate.last_recognized_time = time.time()
             pstate.identity_confidence = score
-            self._learn_appearance(predicted, frame, pstate)
+            self._learn_appearance(predicted, body_frame if body_frame is not None else frame, pstate)
             return
 
         if predicted == pstate.pending_identity:
@@ -1104,11 +1351,14 @@ class CameraFacePipeline:
             pstate.pending_identity = predicted
             pstate.pending_count = 1
 
-        if pstate.pending_count >= RECOGNITION_STABILITY_FRAMES or score >= INSTANT_COMMIT_PROBA:
+        m = self._last_match
+        strong_gallery = (self.__dict__.get("_last_source") == "gallery" and m is not None and m.person_id == predicted
+                          and score >= INSTANT_COMMIT_SIMILARITY and m.margin >= INSTANT_COMMIT_MARGIN)
+        if pstate.pending_count >= RECOGNITION_STABILITY_FRAMES or score >= INSTANT_COMMIT_PROBA or strong_gallery:
             pstate.current_identity = predicted
             pstate.identity_confidence = score
             pstate.last_recognized_time = time.time()
-            self._learn_appearance(predicted, frame, pstate)
+            self._learn_appearance(predicted, body_frame if body_frame is not None else frame, pstate)
 
     def _learn_appearance(self, employee_id: str, frame: np.ndarray, pstate: PersonTrackState) -> None:
         """A face just confirmed who this is: remember their body appearance
@@ -1218,16 +1468,66 @@ class CameraFacePipeline:
                 # on this install, several people enrolled AFTER the last
                 # training run were named as someone else at >= 0.6 (one on 7 of
                 # their 8 enrollment photos). A confident gallery match to a
-                # DIFFERENT person is evidence the classifier has never seen this
-                # face, so the gallery wins; otherwise the classifier answer
-                # stands exactly as before.
-                if res.person_id is not None and res.person_id != predicted:
+                # DIFFERENT person the classifier does NOT know is evidence it has
+                # never seen this face, so the gallery wins. For a person the
+                # classifier WAS trained on, the classifier (trained on real CCTV
+                # captures) is the better judge: letting the weaker photo match
+                # override it named Pushpendra as Alok/Ravi. Measured on 1,265
+                # labelled captures: 30 wrong names with any override, 6 with this.
+                if (res.person_id is not None and res.person_id != predicted
+                        and res.person_id not in {str(c) for c in clf.classes_}):
+                    self._last_source = "gallery"
                     return res.person_id, res.score
+                self._last_source = "classifier"
                 return predicted, score
 
         if res.person_id is not None:
+            self._last_source = "gallery"
             return res.person_id, res.score
+        self._last_source = None
         return None, 0.0
+
+    def _tick(self, stage: str, started: float) -> None:
+        """Smoothed wall-clock cost (ms) of one pipeline stage, for perf_snapshot()."""
+        ms = (time.perf_counter() - started) * 1000.0
+        d = self.__dict__.setdefault("stage_ms", {})
+        prev = d.get(stage)
+        d[stage] = ms if prev is None else prev * 0.8 + ms * 0.2
+
+    def perf_snapshot(self) -> dict[str, float]:
+        """{stage: smoothed ms} - face_detect, person_detect, rescue, recognise."""
+        return {k: round(v, 1) for k, v in self.__dict__.get("stage_ms", {}).items()}
+
+    def close(self) -> None:
+        """Stop this pipeline's background workers (called when it is discarded)."""
+        self._face_closed = True
+        ev = self.__dict__.get("_face_event")
+        if ev is not None:
+            ev.set()
+        q = self.__dict__.get("_recog_queue")
+        if q is not None:
+            try:
+                q.put_nowait(None)
+            except queue.Full:
+                pass
+        pool = self.__dict__.get("_rescue_pool")
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def _recog_worker(self) -> None:
+        while True:
+            job = self._recog_queue.get()
+            if job is None:
+                return
+            pstate = job[0]
+            started = time.perf_counter()
+            try:
+                self._recognize_face(*job)
+            except Exception:
+                log.exception("camera %s: face recognition worker failed", self.camera_id)
+            finally:
+                pstate.recog_inflight = False
+                self._tick("recognise", started)
 
     def _diag(self, reason: str, **fields) -> None:
         """Count one failed recognition attempt and, with FACE_DIAG on, log it
@@ -1252,8 +1552,62 @@ class CameraFacePipeline:
     def get_live_detections(self) -> list[dict]:
         """Snapshot for the /ws/detections/{camera_id} route — see the
         _live_detections attribute comment for the threading contract.
-        Now person-track-based (see _update_person_overlay), not face-track."""
-        return self._live_detections
+        Person-track-based (see _update_person_overlay), not face-track.
+
+        Evaluated at the moment it is asked for, not only when the pipeline
+        last finished a cycle: a person's box is moved along their recent
+        velocity for at most PERSON_PREDICT_MAX_SECONDS (damped), and a box
+        whose person was last actually detected more than
+        PERSON_TRACK_MAX_SECONDS ago is dropped - so boxes stay put and glide
+        while the pipeline is busy, and still disappear on their own once
+        someone has really left, even if the pipeline has stalled."""
+        now = time.time()
+        hold = self._track_hold()
+        fw, fh = self.frame_size if self.frame_size else (None, None)
+        out = []
+        for d in self._live_detections:
+            age = now - d["_last_seen"]
+            if age > hold:
+                continue
+            x1, y1, x2, y2 = d["_disp"]
+            vx, vy = d["_vel"]
+            lead = max(0.0, min(age, PERSON_PREDICT_MAX_SECONDS)) * 0.5   # damped
+            dx, dy = vx * lead, vy * lead
+            box = [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
+            if fw:
+                box = [min(max(box[0], 0), fw), min(max(box[1], 0), fh), min(max(box[2], 0), fw), min(max(box[3], 0), fh)]
+            item = {k: v for k, v in d.items() if not k.startswith("_")}
+            item["bbox"] = [int(round(v)) for v in box]
+            out.append(item)
+        return out
+
+    @staticmethod
+    def _smooth_box(pstate: "PersonTrackState", new, now: float) -> None:
+        """Exponential smoothing of the displayed box towards the new detection,
+        plus a velocity estimate of its centre. A big jump (a different place,
+        not a step) resets instead of smearing."""
+        new = tuple(float(v) for v in new)
+        old = pstate.disp_box
+        if old is None or CameraFacePipeline._iou(np.array(old), np.array(new)) < 0.15:
+            pstate.disp_box, pstate.vel = new, (0.0, 0.0)
+            return
+        a = min(max(PERSON_BOX_SMOOTHING, 0.05), 1.0)
+        sm = tuple(o + a * (n - o) for o, n in zip(old, new))
+        dt = max(now - (pstate.last_seen_time or now), 0.05)
+        vx = ((sm[0] + sm[2]) - (old[0] + old[2])) / 2.0 / dt
+        vy = ((sm[1] + sm[3]) - (old[1] + old[3])) / 2.0 / dt
+        # blend with the previous estimate and cap, so one noisy step cannot
+        # fling the predicted box across the picture
+        cap = 0.5 * max(new[2] - new[0], 1.0) / max(PERSON_PREDICT_MAX_SECONDS, 0.1)
+        pstate.vel = (max(-cap, min(cap, 0.5 * pstate.vel[0] + 0.5 * vx)),
+                      max(-cap, min(cap, 0.5 * pstate.vel[1] + 0.5 * vy)))
+        pstate.disp_box = sm
+
+    def _diag_event(self, event: str, **fields) -> None:
+        """Track lifecycle line (FACE_DIAG only, no rate limit - these are rare)."""
+        if FACE_DIAG:
+            log.info("face_diag camera=%s event=%s %s", self.camera_id, event,
+                     " ".join(f"{k}={v}" for k, v in fields.items()))
 
     def _embed(self, crop: np.ndarray) -> np.ndarray | None:
         """Run InsightFace's own detector on the crop to get landmarks and
@@ -1264,12 +1618,27 @@ class CameraFacePipeline:
         internally. Skipping this (feeding YOLO's raw crop straight into an
         embedding model) is the most common cause of "everyone is unknown."
         """
-        faces = self._arcface.get(crop)
-        if not faces:
+        det = getattr(self._arcface, "det_model", None)
+        rec = getattr(self._arcface, "models", {}).get("recognition")
+        if det is None or rec is None or FACE_EMBED_DET_SIZE <= 0:
+            faces = self._arcface.get(crop)
+            if not faces:
+                return None
+            # Largest face in the crop (should be the only one)
+            face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+            return face.normed_embedding  # already L2-normalized, 512-dim
+        # Same steps as FaceAnalysis.get() (detect -> 5-point landmarks -> aligned
+        # ArcFace embedding), with the detector run at FACE_EMBED_DET_SIZE.
+        from insightface.app.common import Face
+
+        size = (FACE_EMBED_DET_SIZE, FACE_EMBED_DET_SIZE)
+        bboxes, kpss = det.detect(crop, input_size=size, max_num=0, metric="default")
+        if bboxes.shape[0] == 0 or kpss is None:
             return None
-        # Largest face in the crop (should be the only one)
-        face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-        return face.normed_embedding  # already L2-normalized, 512-dim
+        i = int(np.argmax((bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])))
+        face = Face(bbox=bboxes[i, 0:4], kps=kpss[i], det_score=bboxes[i, 4])
+        rec.get(crop, face)
+        return face.normed_embedding
 
     def _embed_with_border(self, crop: np.ndarray) -> np.ndarray | None:
         """_embed() on the crop with grey background added all round - the retry
@@ -1525,11 +1894,28 @@ _pipelines: dict[int, CameraFacePipeline] = {}
 _pipelines_lock = threading.Lock()
 
 
+# Building a pipeline loads models and can take many seconds on a busy machine.
+# It must never happen while _pipelines_lock is held: /ws/detections looks pipelines
+# up from the server's event loop, and a lookup that waited on a lock held through
+# a model load froze every API request and websocket for that long (seen live: the
+# whole portal stopped answering and showed no cameras). So the registry lock only
+# ever guards dict operations; construction is serialised per camera instead.
+_creating: dict[int, threading.Lock] = {}
+
+
 def get_pipeline(camera_id: int) -> CameraFacePipeline:
+    p = _pipelines.get(camera_id)
+    if p is not None:
+        return p
     with _pipelines_lock:
-        if camera_id not in _pipelines:
-            _pipelines[camera_id] = CameraFacePipeline(camera_id)
-        return _pipelines[camera_id]
+        creating = _creating.setdefault(camera_id, threading.Lock())
+    with creating:                                   # one construction per camera at a time
+        p = _pipelines.get(camera_id)
+        if p is None:
+            p = CameraFacePipeline(camera_id)        # slow: models, workers
+            with _pipelines_lock:
+                _pipelines[camera_id] = p
+    return p
 
 
 _cap_warned_at = 0.0
@@ -1554,7 +1940,9 @@ def discard_pipeline(camera_id: int) -> None:
     other cameras are unaffected; any model that failed to load is None and
     gets loaded again by the new pipeline."""
     with _pipelines_lock:
-        _pipelines.pop(camera_id, None)
+        old = _pipelines.pop(camera_id, None)
+    if old is not None:
+        old.close()
 
 
 def get_existing_pipeline(camera_id: int) -> "CameraFacePipeline | None":
@@ -1562,6 +1950,8 @@ def get_existing_pipeline(camera_id: int) -> "CameraFacePipeline | None":
     up a full pipeline (loads YOLO+ArcFace) on its own just because a
     browser tab opened the overlay socket; a pipeline only ever gets created
     by camera_stream.py once /ws/live's RTSP read loop for that camera is
-    actually running."""
-    with _pipelines_lock:
-        return _pipelines.get(camera_id)
+    actually running.
+
+    Lock-free on purpose: it is called from the event loop and must never wait
+    for a pipeline that is still being built (a dict read is atomic)."""
+    return _pipelines.get(camera_id)

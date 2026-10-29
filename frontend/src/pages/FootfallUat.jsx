@@ -70,7 +70,7 @@ export default function FootfallUat() {
       setPeople(p);
       setError("");
     } catch {
-      setError("Couldn't reach the backend. Check it's running on port 8821.");
+      setError("Couldn't reach the backend. Check it's running on port 8822.");
     }
   }, []);
 

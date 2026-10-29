@@ -90,7 +90,10 @@ export default function VisitorManagement() {
             ...t,
             ...fresh.map((e) => ({
               key: e.id,
-              text: `Visitor detected on ${e.camera_name} at ${fmtTime(e.entered_at)} (event #${e.id})`,
+              text:
+                e.alert_seq > 1
+                  ? `Visitor still seated on ${e.camera_name} at ${fmtTime(e.alert_at)} (since ${fmtTime(e.entered_at)}, event #${e.id})`
+                  : `Visitor detected on ${e.camera_name} at ${fmtTime(e.alert_at || e.entered_at)} (event #${e.id})`,
               id: e.id,
             })),
           ]);

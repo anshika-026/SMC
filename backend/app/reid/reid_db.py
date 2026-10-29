@@ -110,6 +110,21 @@ def init_db() -> None:
             )
             """
         )
+        # Footfall report history kept across a count reset (reset_identities
+        # wipes reid_events). person_ref is "<reset time>-<person id>" because
+        # person ids restart at 1 after a reset. Times and camera only.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS footfall_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                person_ref TEXT NOT NULL,
+                camera_id INTEGER NOT NULL,
+                ts REAL NOT NULL,
+                event_type TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_footfall_history_ts ON footfall_history(ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reid_events_camera_ts ON reid_events(camera_id, ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reid_events_person_ts ON reid_events(person_id, ts)")
         conn.execute(
@@ -403,6 +418,13 @@ def reset_identities(delete_snapshot_files: bool = True) -> dict[str, int]:
                 pass  # a locked/missing file must not abort the reset
 
     with get_connection() as conn:
+        # Keep the footfall report history: the counted events move to
+        # footfall_history before the live tables are cleared.
+        conn.execute(
+            "INSERT INTO footfall_history (person_ref, camera_id, ts, event_type) "
+            "SELECT ? || '-' || person_id, camera_id, ts, event_type FROM reid_events WHERE person_id IS NOT NULL",
+            (str(int(time.time())),),
+        )
         for table in ("reid_events", "reid_tracks", "reid_snapshots", "reid_embeddings", "reid_persons"):
             removed[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             conn.execute(f"DELETE FROM {table}")

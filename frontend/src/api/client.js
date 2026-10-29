@@ -227,8 +227,37 @@ export function parseRtspUrl(raw) {
   return { user, password, host: host || "", port: portStr ? Number(portStr) : 554, streamPath: path || "/" };
 }
 
+// Camera source protocols. RTSP is the default for every existing camera.
+export const CAMERA_PROTOCOLS = ["rtsp", "rtmp", "rtmp_push"];
+export const PUSH_PROTOCOL = "rtmp_push";
+
+// Quick client-side check of an RTMP link (the backend validates again and is the
+// authority). Returns { error } or { host, port }. The link is never logged: its
+// last path segment is the stream key.
+export function parseRtmpUrl(raw) {
+  const url = String(raw || "").trim();
+  if (!url) return { error: "Enter the RTMP link, for example rtmp://host/app/stream-key" };
+  if (/[\s"'<>`\\]/.test(url)) return { error: "The link contains spaces or characters that are not allowed" };
+  const m = /^rtmps?:\/\/(?:[^@/]*@)?([^:/?#]+)(?::(\d+))?(\/[^?#]*)?/i.exec(url);
+  if (!m) return { error: "The link must start with rtmp:// (or rtmps://)" };
+  const port = m[2] ? Number(m[2]) : /^rtmps/i.test(url) ? 443 : 1935;
+  if (port < 1 || port > 65535) return { error: "The RTMP port must be between 1 and 65535" };
+  if (!(m[3] || "").replace(/\//g, "")) {
+    return { error: "The link needs the application name after the address, e.g. rtmp://host/live/stream-key" };
+  }
+  return { host: m[1], port };
+}
+
 function mapCamera(c) {
   return {
+    protocol: c.protocol || "rtsp",
+    // RTMP links carry the stream key, so the backend only says whether one is
+    // saved and shows a masked form (rtmp://host/app/***).
+    sourceUrlSet: !!c.source_url_set,
+    sourceDisplay: c.source_display || "",
+    // RTMP push: whether the camera has a stream key (the key itself is only ever
+    // fetched through getRtmpSetup, never listed).
+    rtmpKeySet: !!c.rtmp_key_set,
     id: c.id,
     code: c.cam_code || `CAM-${c.id}`,
     label: c.name,
@@ -255,7 +284,9 @@ export async function getCameras() {
 export async function addCamera(payload) {
   // payload.streamUrl is a full rtsp:// link; split into the fields the
   // backend stores (password included — it's only ever sent, never read back).
-  const s = payload.streamUrl ? parseRtspUrl(payload.streamUrl) : null;
+  const rtmp = payload.protocol === "rtmp";
+  const push = payload.protocol === PUSH_PROTOCOL;
+  const s = !rtmp && payload.streamUrl ? parseRtspUrl(payload.streamUrl) : null;
   return request("/cameras", {
     method: "POST",
     body: JSON.stringify({
@@ -263,6 +294,11 @@ export async function addCamera(payload) {
       site: payload.site,
       cam_code: payload.code || "",
       purpose: payload.purpose || "GENERAL",
+      // An RTMP camera sends its whole link; the backend derives the host/port.
+      ...(rtmp && { protocol: "rtmp", source_url: (payload.streamUrl || "").trim() }),
+      // RTMP push: nothing to send - the backend generates the stream key and
+      // returns the setup details (rtmp_setup) with the new camera.
+      ...(push && { protocol: PUSH_PROTOCOL }),
       ...(s && { host: s.host, port: s.port, user: s.user, password: s.password, stream_path: s.streamPath }),
       attendance_tracking: payload.attendanceTracking ?? true,
       live_feed_enabled: true,
@@ -271,11 +307,11 @@ export async function addCamera(payload) {
 }
 // Connects to an RTSP link once and returns an object URL of one still, or
 // throws with the backend's explanation (bad address, login, stream path).
-export async function testCameraStream(rtspUrl) {
+export async function testCameraStream(url, protocol = "rtsp") {
   const res = await fetch(`${BASE_URL}/cameras/test-stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ rtsp_url: rtspUrl }),
+    body: JSON.stringify({ url, protocol }),
   });
   if (res.status === 401) handleAuthFailure();
   if (!res.ok) {
@@ -283,6 +319,15 @@ export async function testCameraStream(rtspUrl) {
     throw new Error(err?.detail || `Couldn't reach the camera (${res.status})`);
   }
   return URL.createObjectURL(await res.blob());
+}
+// RTMP push setup for one camera: { server_url, stream_key, full_url, status }.
+// Admin only. status: online (frames arriving) | receiving | offline | unknown.
+export async function getRtmpSetup(id) {
+  return request(`/cameras/${id}/rtmp-setup`);
+}
+// New stream key; the old one stops working and its publisher is disconnected.
+export async function rotateRtmpKey(id) {
+  return request(`/cameras/${id}/rtmp-key/rotate`, { method: "POST" });
 }
 export async function updateCamera(id, payload) {
   return request(`/cameras/${id}`, { method: "PUT", body: JSON.stringify(payload) });

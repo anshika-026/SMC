@@ -2,7 +2,7 @@
 api.js already expects (listCameras/createCamera/... and listSites/...)."""
 
 import sqlite3
-from app import config, db
+from app import config, db, stream_source
 
 DB_PATH = config.DB_PATH
 
@@ -31,7 +31,10 @@ def init_db() -> None:
                 vendor TEXT DEFAULT '',
                 status TEXT DEFAULT 'inactive',
                 live_feed_enabled INTEGER DEFAULT 1,
-                attendance_tracking INTEGER DEFAULT 1
+                attendance_tracking INTEGER DEFAULT 1,
+                protocol TEXT DEFAULT 'rtsp',
+                source_url TEXT DEFAULT '',
+                rtmp_stream_key TEXT
             )
             """
         )
@@ -55,6 +58,19 @@ def _migrate_cameras_table(conn: sqlite3.Connection) -> None:
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(cameras)").fetchall()}
     if "attendance_tracking" not in existing_cols:
         conn.execute("ALTER TABLE cameras ADD COLUMN attendance_tracking INTEGER DEFAULT 1")
+    # Source protocol. Additive: every existing row reads back as 'rtsp' and keeps
+    # working from its host/port/user/password/stream_path exactly as before.
+    # source_url holds an RTMP link (its stream key is a secret; see stream_source.py).
+    if "protocol" not in existing_cols:
+        conn.execute("ALTER TABLE cameras ADD COLUMN protocol TEXT DEFAULT 'rtsp'")
+    if "source_url" not in existing_cols:
+        conn.execute("ALTER TABLE cameras ADD COLUMN source_url TEXT DEFAULT ''")
+    # RTMP push: the camera-specific publish key (secret, unique, NULL for every
+    # other camera). Additive; existing rows get NULL.
+    if "rtmp_stream_key" not in existing_cols:
+        conn.execute("ALTER TABLE cameras ADD COLUMN rtmp_stream_key TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cameras_rtmp_stream_key ON cameras(rtmp_stream_key) "
+                 "WHERE rtmp_stream_key IS NOT NULL")
 
 
 def _seed_sites_if_empty(conn: sqlite3.Connection) -> None:
@@ -67,17 +83,33 @@ def _seed_sites_if_empty(conn: sqlite3.Connection) -> None:
 def is_streamable(cam: dict | None) -> bool:
     """Has an address and its feed is switched on (Camera Management's
     Live feed switch). A switched-off camera is never connected to: no live
-    view, no analytics, no background streaming."""
-    return bool(cam and cam.get("host") and cam.get("live_feed_enabled", 1))
+    view, no analytics, no background streaming. An RTMP camera also needs its
+    RTMP link (rows from the API only say whether one is set: source_url_set)."""
+    if not (cam and cam.get("host") and cam.get("live_feed_enabled", 1)):
+        return False
+    if stream_source.protocol_of(cam) == "rtmp":
+        return bool(cam.get("source_url") or cam.get("source_url_set"))
+    if stream_source.protocol_of(cam) == stream_source.PUSH_PROTOCOL:
+        return bool(cam.get("rtmp_stream_key") or cam.get("rtmp_key_set"))
+    return True
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
+    d["protocol"] = stream_source.protocol_of(d)
+    d["rtmp_key_set"] = bool(d.get("rtmp_stream_key"))
     d["is_configured"] = bool(d["host"])
     d["live"] = is_streamable(d)
     # Status shown in the UI: a camera whose feed is switched off is inactive.
     d["status"] = "active" if d["live"] else "inactive"
     d.pop("password", None)  # never sent to the frontend
+    # The RTMP link carries the stream key: only a masked form and a "set" flag
+    # ever leave the backend, never the link itself.
+    source = d.pop("source_url", "") or ""
+    d["source_url_set"] = bool(source)
+    # RTMP push key: never in camera listings (fetch it via the setup endpoint).
+    d["rtmp_key_set"] = bool(d.pop("rtmp_stream_key", None))
+    d["source_display"] = stream_source.redact_source(source) if source else ""
     return d
 
 
@@ -96,7 +128,8 @@ def get_camera(camera_id: int) -> dict | None:
 
 
 def get_camera_connection(camera_id: int) -> dict | None:
-    """Includes the password — internal use only (building the RTSP URL)."""
+    """Includes the password and the RTMP link — internal use only (building the
+    address the reader opens)."""
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM cameras WHERE id = ?", (camera_id,)).fetchone()
@@ -108,8 +141,8 @@ def add_camera(name: str, site: str, **fields) -> int:
         cur = conn.execute(
             """INSERT INTO cameras
                (name, site, cam_code, purpose, host, port, user, password, stream_path, vendor,
-                status, live_feed_enabled, attendance_tracking)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                status, live_feed_enabled, attendance_tracking, protocol, source_url, rtmp_stream_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 name,
                 site,
@@ -124,6 +157,9 @@ def add_camera(name: str, site: str, **fields) -> int:
                 "active" if fields.get("host") else "inactive",
                 int(fields.get("live_feed_enabled", True)),
                 int(fields.get("attendance_tracking", True)),
+                fields.get("protocol") or "rtsp",
+                fields.get("source_url") or "",
+                fields.get("rtmp_stream_key") or None,
             ),
         )
         return cur.lastrowid
@@ -137,6 +173,24 @@ def update_camera(camera_id: int, **fields) -> None:
     columns = ", ".join(f"{k} = ?" for k in fields)
     with get_connection() as conn:
         conn.execute(f"UPDATE cameras SET {columns} WHERE id = ?", (*fields.values(), camera_id))
+
+
+def get_camera_by_stream_key(key: str) -> dict | None:
+    """The RTMP-push camera that owns this publish key (internal: includes secrets)."""
+    if not stream_source.is_stream_key(key):
+        return None
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM cameras WHERE rtmp_stream_key = ? AND protocol = ?",
+                           (key, stream_source.PUSH_PROTOCOL)).fetchone()
+    return dict(row) if row else None
+
+
+def set_stream_key(camera_id: int, key: str | None) -> None:
+    """Store (or with None clear) a camera's publish key. The unique index makes
+    a collision an IntegrityError, so a caller can retry with a fresh key."""
+    with get_connection() as conn:
+        conn.execute("UPDATE cameras SET rtmp_stream_key = ? WHERE id = ?", (key, camera_id))
 
 
 def delete_camera(camera_id: int) -> None:

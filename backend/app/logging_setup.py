@@ -21,6 +21,13 @@ _FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
 _REDACTIONS = (
     (re.compile(r"(rtsps?://)([^:/@\s]+):([^@\s]+)@", re.I), r"\1\2:***@"),
+    # RTMP: user:password@ and, because the stream key is the last part of the
+    # path (rtmp://host/app/KEY?token=...), everything after the application name.
+    (re.compile(r"(rtmps?://)([^:/@\s]+):([^@\s]+)@", re.I), r"\1\2:***@"),
+    (re.compile(r"(rtmps?://[^/\s]+/[^/\s'\"]+/)[^\s'\"]+", re.I), r"\1***"),
+    # RTMP push keys (32 URL-safe characters) wherever they appear as a stream
+    # path segment, e.g. the backend's internal read address of a pushed stream.
+    (re.compile(r"(/[A-Za-z0-9_-]{1,32}/)[A-Za-z0-9_-]{32}(?![A-Za-z0-9_-])"), r"\1***"),
     (re.compile(r"((?:password|passwd|pwd|token|secret|api_key)=)[^&\s'\"]+", re.I), r"\1***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), r"\1***"),
 )

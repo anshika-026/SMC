@@ -1,32 +1,39 @@
 """
 visitors.py
 
-Visitor Management: a visitor event every time a person ENTERS an area an admin
-marked on a camera, with a 10-second video clip of it. No face and no registered
-identity is needed: it works on tracked people (person_detection.py, the same
-detector footfall / staff count share, so this adds no second
-detection pass; cameras without a saved area cost nothing).
+Visitor Management: an alert when an UNKNOWN person sits in an area an admin
+marked on a camera (the visitor seating area), with a 10-second video clip. It
+works on tracked people (person_detection.py, the same detector footfall / staff
+count share, so this adds no second detection pass; cameras without a saved area
+cost nothing). Employees are recognised with the face pipeline's existing
+identities, so this adds no face inference either.
 
 Zone rule      A person is "in the area" when their FEET (bottom-centre of the box)
                are inside the polygon, as fractions of the frame, so the saved
                area is independent of how the picture is displayed.
-New entry      Inside on ENTRY_CONFIRM_LOOKS consecutive looks (about 1 s) so a
-               box jittering on the border does not fire. One event per visit: a
-               person who stays inside, and the tracker handing them a new id
-               while they stand there, stay the same event.
-Departure      Not in the area for EXIT_GRACE_SECONDS (a brief detection loss is
-               not a departure): the visit is then marked "left" (this only sets
-               the departure time that the clip's deletion is counted from).
-One alert      A visitor is alerted ONCE. A tracking id that has produced an event
-               never produces another one (HANDLED_TRACK_MEMORY_SECONDS), so
-               leaving and coming back does not alert again. A new id that appears
-               where someone left less than REENTRY_SUPPRESS_SECONDS ago is the
-               same person re-labelled by the tracker, so it does not alert either.
-               Without face recognition this is the limit: someone who leaves the
-               camera's view completely and returns later under a brand-new id
-               looks like a new visitor.
+Visit          Inside on ENTRY_CONFIRM_LOOKS consecutive looks (about 1 s) opens a
+               visit. A person who stays inside, and the tracker handing them a new
+               id at the same spot (within ABSENCE_GRACE_SECONDS), stay one visit.
+Employees      Each look, the visitor's box is matched (overlap) to the face
+               pipeline's live tracks on the same camera. A track that pipeline has
+               identified as an enrolled person (EMPLOYEE_SOURCES: by face, and by
+               body appearance matched to someone face-recognised today) makes the
+               visit an EMPLOYEE visit: no alert, not counted. If that happens after
+               an alert, the alert and its clip are removed again.
+Alerts         Per visit, never per area. An alert is due at entry, then every
+               REPEAT_ALERT_MINUTES (30). A due alert fires only once the person has
+               been seen without a break (gaps up to PRESENCE_BREAK_SECONDS are not
+               a break) for DETECTION_GAP_SECONDS (10) since it became due, and is
+               still not recognised as an employee. So the first alert comes ~10 s
+               after sitting down (enough for recognition to name an employee), and
+               a person still seated at 11:30 is alerted again at ~11:30:10, not
+               every 10 s. A brief detection loss neither resets the 30-minute timer
+               nor raises an extra alert.
+Departure      Not in the area for ABSENCE_GRACE_SECONDS (60): the visit closes and
+               its alerts are marked "left". Coming back after that is a new visit
+               with a new alert cycle.
 Clip           A rolling buffer of the last few seconds per camera that has an
-               area; when the event fires, ~5 s before + ~5 s after the entry is
+               area; when an alert fires, ~5 s before + ~5 s after it is
                encoded to an H.264 MP4 on a background thread (live video and
                detection never wait for it).
 Retention      Every event carries an expiry, so nothing is kept forever:
@@ -42,6 +49,7 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures
+import itertools
 import json
 import logging
 import os
@@ -64,12 +72,18 @@ CLIPS_DIR = Path(config.DATA_DIR) / "visitor_clips"
 DETECT_FPS = float(os.environ.get("VISITOR_DETECT_FPS", "2"))
 PERSON_CONF = float(os.environ.get("VISITOR_PERSON_CONF", "0.45"))
 ENTRY_CONFIRM_LOOKS = int(os.environ.get("VISITOR_ENTRY_CONFIRM_LOOKS", "2"))
-EXIT_GRACE_SECONDS = float(os.environ.get("VISITOR_EXIT_GRACE_SECONDS", "10"))
+# Alert policy (see the module docstring). Each is per visit.
+DETECTION_GAP_SECONDS = float(os.environ.get("VISITOR_DETECTION_GAP_SECONDS", "10"))
+REPEAT_ALERT_MINUTES = float(os.environ.get("VISITOR_REPEAT_ALERT_MINUTES", "30"))  # 0 = alert once per visit
+PRESENCE_BREAK_SECONDS = float(os.environ.get("VISITOR_PRESENCE_BREAK_SECONDS", "3"))
+ABSENCE_GRACE_SECONDS = float(os.environ.get("VISITOR_ABSENCE_GRACE_SECONDS",
+                                             os.environ.get("VISITOR_EXIT_GRACE_SECONDS", "60")))
+EXIT_GRACE_SECONDS = ABSENCE_GRACE_SECONDS  # older name, kept for the settings API
+EXCLUDE_EMPLOYEES = os.environ.get("VISITOR_EXCLUDE_EMPLOYEES", "1").strip().lower() not in ("0", "false", "no", "off")
+EMPLOYEE_SOURCES = frozenset(s.strip() for s in os.environ.get("VISITOR_EMPLOYEE_SOURCES", "face,appearance").split(",") if s.strip())
+EMPLOYEE_MATCH_IOU = 0.3
 ID_SWITCH_SECONDS = 3.0   # a new track id this soon after, overlapping, is the same person
 ID_SWITCH_IOU = 0.3
-# One alert per visitor (see the module docstring).
-HANDLED_TRACK_MEMORY_SECONDS = float(os.environ.get("VISITOR_HANDLED_TRACK_MEMORY_SECONDS", str(2 * 3600)))
-REENTRY_SUPPRESS_SECONDS = float(os.environ.get("VISITOR_REENTRY_SUPPRESS_SECONDS", "60"))
 
 PRE_SECONDS = float(os.environ.get("VISITOR_CLIP_PRE_SECONDS", "5"))
 POST_SECONDS = float(os.environ.get("VISITOR_CLIP_POST_SECONDS", "5"))
@@ -123,12 +137,39 @@ def init_db() -> None:
                    entry_x REAL,                     -- where the visitor's feet were at entry (fractions of the frame)
                    entry_y REAL)"""
         )
-        for col in ("entry_x", "entry_y"):  # databases created before these columns existed
+        # Databases created before these columns existed. One row is one ALERT;
+        # visit_key groups the alerts of one continuous stay (1st, 2nd after
+        # 30 min, ...), alert_at is when that alert fired.
+        for col, typ in (("entry_x", "REAL"), ("entry_y", "REAL"), ("visit_key", "TEXT"),
+                         ("alert_seq", "INTEGER"), ("alert_at", "REAL")):
             try:
-                conn.execute(f"ALTER TABLE visitor_events ADD COLUMN {col} REAL")
+                conn.execute(f"ALTER TABLE visitor_events ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
                 pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor_events_cam ON visitor_events (camera_id, entered_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor_events_visit ON visitor_events (visit_key)")
+        # PERMANENT report history: one row per alert, times and camera only (no
+        # clip, no image), so reports outlive the 24 h clip retention. Removed
+        # only with its alert (an employee recognised late, or a manual delete).
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS visitor_report_log (
+                   event_id INTEGER PRIMARY KEY,
+                   camera_id INTEGER NOT NULL,
+                   camera_name TEXT,
+                   visit_key TEXT,
+                   alert_seq INTEGER NOT NULL DEFAULT 1,
+                   entered_at REAL NOT NULL,
+                   alert_at REAL NOT NULL,
+                   left_at REAL,
+                   departure TEXT)"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor_report_log_ts ON visitor_report_log (alert_at)")
+        # Alerts recorded before this table existed (still within retention).
+        conn.execute(
+            "INSERT OR IGNORE INTO visitor_report_log (event_id, camera_id, camera_name, visit_key, alert_seq, entered_at, alert_at, left_at, departure) "
+            "SELECT id, camera_id, camera_name, visit_key, COALESCE(alert_seq, 1), entered_at, COALESCE(alert_at, entered_at), left_at, departure "
+            "FROM visitor_events"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor_events_exp ON visitor_events (expires_at)")
 
 
@@ -193,12 +234,15 @@ def delete_zone(camera_id: int) -> bool:
 # --------------------------------------------------------------------------- events
 
 _PUBLIC_COLUMNS = ("id", "camera_id", "camera_name", "track_id", "entered_at", "last_in_zone_at", "left_at", "departure",
-                   "status", "clip_status", "clip_error", "clip_frames", "expires_at", "entry_x", "entry_y")
+                   "status", "clip_status", "clip_error", "clip_frames", "expires_at", "entry_x", "entry_y",
+                   "alert_seq", "alert_at")
 
 
 def _public(row) -> dict:
     d = {k: row[k] for k in _PUBLIC_COLUMNS}
     d["clip_ready"] = row["clip_status"] == "ready" and bool(row["clip_path"])
+    d["alert_seq"] = d["alert_seq"] or 1          # rows from before repeat alerts
+    d["alert_at"] = d["alert_at"] or d["entered_at"]
     return d
 
 
@@ -210,7 +254,7 @@ def list_events(camera_id: int | None = None, limit: int = 50, after_id: int | N
     if after_id is not None:
         q += " AND id > ?"
         params.append(after_id)
-    q += " ORDER BY entered_at DESC, id DESC LIMIT ?"
+    q += " ORDER BY COALESCE(alert_at, entered_at) DESC, id DESC LIMIT ?"
     params.append(limit)
     with _conn() as conn:
         return [_public(r) for r in conn.execute(q, params).fetchall()]
@@ -250,6 +294,7 @@ def delete_event(event_id: int) -> bool:
         if row is None:
             return False
         conn.execute("DELETE FROM visitor_events WHERE id = ?", (event_id,))
+        conn.execute("DELETE FROM visitor_report_log WHERE event_id = ?", (event_id,))
     _remove_file(row["clip_path"])
     return True
 
@@ -307,21 +352,31 @@ def _iou(a, b) -> float:
 
 
 class _Track:
-    __slots__ = ("inside_looks", "event_id", "bbox")
+    __slots__ = ("inside_looks", "visit_key", "bbox")
 
     def __init__(self):
         self.inside_looks = 0
-        self.event_id: int | None = None
+        self.visit_key: str | None = None
         self.bbox = None
 
 
-class _Open:
-    """A visit that is still in progress."""
-    __slots__ = ("event_id", "track_id", "bbox", "entered_at", "last_in", "last_written")
+class _Visit:
+    """One continuous stay of one person in the area (in memory only).
 
-    def __init__(self, event_id, track_id, bbox, ts):
-        self.event_id, self.track_id, self.bbox = event_id, track_id, bbox
-        self.entered_at = self.last_in = self.last_written = ts
+    kind: pending  - not alerted yet, not recognised as an employee
+          visitor  - alerted at least once
+          employee - recognised as an enrolled person: never alerted, not counted
+    """
+    __slots__ = ("key", "track_id", "bbox", "entered_at", "last_in", "stable_since", "last_written",
+                 "kind", "employee_id", "alert_ids", "next_due")
+
+    def __init__(self, key, track_id, bbox, ts):
+        self.key, self.track_id, self.bbox = key, track_id, bbox
+        self.entered_at = self.last_in = self.stable_since = self.last_written = ts
+        self.kind = "pending"
+        self.employee_id: str | None = None
+        self.alert_ids: list[int] = []
+        self.next_due = ts  # the first alert is due at entry (after the detection gap)
 
 
 class _KeepAliveSink:
@@ -333,11 +388,8 @@ class VisitorService:
     def __init__(self):
         self._zones: dict[int, list] = {}
         self._tracks: dict[int, dict[int, _Track]] = {}
-        self._open: dict[int, dict[int, _Open]] = {}
-        # camera -> {track id: when it raised its event}: these never alert again.
-        self._handled: dict[int, dict[int, float]] = {}
-        # camera -> [(bbox, left_at)] of visitors who just left (a new id on the same spot = same person)
-        self._recent_left: dict[int, list] = {}
+        self._open: dict[int, dict[str, _Visit]] = {}   # camera -> {visit key: visit}
+        self._visit_seq = itertools.count(1)
         self._state_lock = threading.RLock()
         self._executors: dict[int, concurrent.futures.ThreadPoolExecutor] = {}
         self._futures: dict[int, concurrent.futures.Future] = {}
@@ -388,6 +440,8 @@ class VisitorService:
                 left = r["last_in_zone_at"]
                 conn.execute("UPDATE visitor_events SET status = 'left', left_at = ?, departure = 'assumed', expires_at = ? WHERE id = ?",
                              (left, min(r["expires_at"], left + RETENTION_AFTER_DEPARTURE_HOURS * 3600), r["id"]))
+                conn.execute("UPDATE visitor_report_log SET left_at = ?, departure = 'assumed' WHERE event_id = ? AND left_at IS NULL",
+                             (left, r["id"]))
         if rows:
             log.info("visitors: closed %d visit(s) left open by a restart", len(rows))
 
@@ -468,84 +522,167 @@ class VisitorService:
                 inside[tid] = b
         with self._state_lock:
             tracks = self._tracks.setdefault(camera_id, {})
-            opens = self._open.setdefault(camera_id, {})
-            handled = self._handled.setdefault(camera_id, {})
-            for k in [k for k, when in handled.items() if ts - when > HANDLED_TRACK_MEMORY_SECONDS]:
-                handled.pop(k, None)
-            self._recent_left[camera_id] = [r for r in self._recent_left.get(camera_id, []) if ts - r[1] <= REENTRY_SUPPRESS_SECONDS]
+            visits = self._open.setdefault(camera_id, {})
             for tid, bbox in inside.items():
                 t = tracks.setdefault(tid, _Track())
                 t.inside_looks += 1
                 t.bbox = bbox
-                if t.event_id is not None:
-                    o = opens.get(t.event_id)
-                    if o is not None:
-                        o.last_in, o.bbox = ts, bbox
-                        if ts - o.last_written >= LAST_IN_WRITE_SECONDS:
-                            o.last_written = ts
-                            self._db_touch(o.event_id, ts)
-                    continue
-                if tid in handled:
-                    continue  # this person already raised their one alert
-                if t.inside_looks >= ENTRY_CONFIRM_LOOKS:
-                    self._enter(camera_id, tid, t, bbox, ts, inside, w, h)
+                v = visits.get(t.visit_key) if t.visit_key else None
+                if v is None:
+                    if t.inside_looks < ENTRY_CONFIRM_LOOKS:
+                        continue
+                    v = self._reattach(camera_id, tid, bbox, ts, inside) or self._open_visit(camera_id, tid, bbox, ts)
+                    t.visit_key = v.key
+                self._seen(v, tid, bbox, ts)
+                if EXCLUDE_EMPLOYEES and v.kind != "employee":
+                    employee = self.identify(camera_id, bbox, w, h)
+                    if employee:
+                        self._mark_employee(camera_id, v, employee)
+                self._maybe_alert(camera_id, v, ts, w, h)
             for tid, t in list(tracks.items()):
                 if tid not in inside:
                     t.inside_looks = 0
-                    if t.event_id is None:
-                        tracks.pop(tid, None)  # a track that never became a visit
+                    if t.visit_key is None or t.visit_key not in visits:
+                        tracks.pop(tid, None)  # a track that is not (or no longer) a visit
             self._close_departed(camera_id, ts)
 
-    def _enter(self, camera_id: int, tid: int, t: _Track, bbox, ts: float, inside_now: dict, w: int, h: int) -> None:
-        opens = self._open.setdefault(camera_id, {})
-        # The tracker gave the same person a new id while they stand in the
-        # area: continue their visit instead of starting another one.
-        for o in opens.values():
-            if o.track_id != tid and o.track_id not in inside_now and ts - o.last_in <= ID_SWITCH_SECONDS \
-                    and _iou(o.bbox, bbox) >= ID_SWITCH_IOU:
-                old = self._tracks.get(camera_id, {}).get(o.track_id)
-                if old is not None:
-                    old.event_id = None
-                o.track_id, o.bbox, o.last_in = tid, bbox, ts
-                t.event_id = o.event_id
-                self._handled.setdefault(camera_id, {})[tid] = ts
-                return
-        # A visitor left a moment ago exactly here and the tracker gave them a new id:
-        # the same person, who has already been alerted.
-        for left_bbox, left_ts in self._recent_left.get(camera_id, []):
-            if ts - left_ts <= REENTRY_SUPPRESS_SECONDS and _iou(left_bbox, bbox) >= ID_SWITCH_IOU:
-                self._handled.setdefault(camera_id, {})[tid] = ts
-                return
+    # ---- visits ----------------------------------------------------------------
+
+    def _open_visit(self, camera_id: int, tid: int, bbox, ts: float) -> _Visit:
+        v = _Visit(f"{camera_id}-{int(ts * 1000)}-{next(self._visit_seq)}", tid, bbox, ts)
+        self._open.setdefault(camera_id, {})[v.key] = v
+        log.info("visitors: visit %s - person (track %s) in the area on camera %s", v.key, tid, camera_id)
+        return v
+
+    def _reattach(self, camera_id: int, tid: int, bbox, ts: float, inside_now: dict) -> _Visit | None:
+        """The tracker gave someone already in a visit a new id (after an
+        occlusion, or a moment out of sight): continue that visit, its alert
+        timer and its identity, instead of starting another one. The best
+        overlapping visit whose own track is not in the area right now.
+
+        An employee visit is only taken over by an immediate re-label
+        (ID_SWITCH_SECONDS): a different person sitting down on the same seat a
+        bit later must not inherit the employee exclusion."""
+        best, best_iou = None, ID_SWITCH_IOU
+        for v in self._open.get(camera_id, {}).values():
+            if v.track_id == tid or v.track_id in inside_now:
+                continue
+            limit = ID_SWITCH_SECONDS if v.kind == "employee" else ABSENCE_GRACE_SECONDS
+            if ts - v.last_in > limit:
+                continue
+            iou = _iou(v.bbox, bbox)
+            if iou >= best_iou:
+                best, best_iou = v, iou
+        if best is None:
+            return None
+        old = self._tracks.get(camera_id, {}).get(best.track_id)
+        if old is not None:
+            old.visit_key = None
+        log.info("visitors: visit %s continues on camera %s (track %s -> %s)", best.key, camera_id, best.track_id, tid)
+        best.track_id = tid
+        return best
+
+    def _seen(self, v: _Visit, tid: int, bbox, ts: float) -> None:
+        # A loss longer than PRESENCE_BREAK_SECONDS restarts the detection-gap
+        # check only. It never resets the visit or its repeat-alert timer.
+        if ts - v.last_in > PRESENCE_BREAK_SECONDS:
+            v.stable_since = ts
+        v.track_id, v.bbox, v.last_in = tid, bbox, ts
+        if v.alert_ids and ts - v.last_written >= LAST_IN_WRITE_SECONDS:
+            v.last_written = ts
+            self._db_touch(v.key, ts)
+
+    def _maybe_alert(self, camera_id: int, v: _Visit, ts: float, w: int, h: int) -> None:
+        """At most one alert per due time: due at entry, then every
+        REPEAT_ALERT_MINUTES, each fired only after DETECTION_GAP_SECONDS of
+        unbroken presence since it became due."""
+        if v.kind == "employee" or ts < v.next_due:
+            return
+        if ts - max(v.stable_since, v.next_due) < DETECTION_GAP_SECONDS:
+            return
+        self._alert(camera_id, v, ts, w, h)
+        v.kind = "visitor"
+        v.next_due = ts + REPEAT_ALERT_MINUTES * 60 if REPEAT_ALERT_MINUTES > 0 else float("inf")
+
+    def _alert(self, camera_id: int, v: _Visit, ts: float, w: int, h: int) -> None:
         cam = camera_db.get_camera(camera_id) or {}
+        bbox = v.bbox
         expires = ts + (MAX_PRESENCE_HOURS + RETENTION_AFTER_DEPARTURE_HOURS) * 3600  # fallback cap, tightened on departure
+        seq = len(v.alert_ids) + 1
         with _conn() as conn:
             cur = conn.execute(
-                "INSERT INTO visitor_events (camera_id, camera_name, track_id, entered_at, last_in_zone_at, status, clip_status, expires_at, created_at, entry_x, entry_y) "
-                "VALUES (?, ?, ?, ?, ?, 'inside', 'pending', ?, ?, ?, ?)",
-                (camera_id, cam.get("name") or f"Camera {camera_id}", tid, ts, ts, expires, time.time(),
-                 round((bbox[0] + bbox[2]) / 2 / w, 4), round(bbox[3] / h, 4)),
+                "INSERT INTO visitor_events (camera_id, camera_name, track_id, entered_at, last_in_zone_at, status, clip_status, expires_at, created_at, "
+                "entry_x, entry_y, visit_key, alert_seq, alert_at) VALUES (?, ?, ?, ?, ?, 'inside', 'pending', ?, ?, ?, ?, ?, ?, ?)",
+                (camera_id, cam.get("name") or f"Camera {camera_id}", v.track_id, v.entered_at, ts, expires, time.time(),
+                 round((bbox[0] + bbox[2]) / 2 / w, 4), round(bbox[3] / h, 4), v.key, seq, ts),
             )
             event_id = cur.lastrowid
-        opens[event_id] = _Open(event_id, tid, bbox, ts)
-        t.event_id = event_id
-        self._handled.setdefault(camera_id, {})[tid] = ts  # one alert per visitor
-        log.info("visitors: event %s - person (track %s) entered the area on camera %s", event_id, tid, camera_id)
+            conn.execute(
+                "INSERT OR REPLACE INTO visitor_report_log (event_id, camera_id, camera_name, visit_key, alert_seq, entered_at, alert_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (event_id, camera_id, cam.get("name") or f"Camera {camera_id}", v.key, seq, v.entered_at, ts),
+            )
+        v.alert_ids.append(event_id)
+        v.last_written = ts
+        log.info("visitors: alert %s (#%d of visit %s) - unknown person in the area on camera %s", event_id, seq, v.key, camera_id)
         self._schedule_clip(event_id, camera_id, ts)
 
-    def _db_touch(self, event_id: int, ts: float) -> None:
+    def _mark_employee(self, camera_id: int, v: _Visit, employee_id: str) -> None:
+        """Recognised as an enrolled person: no alerts for this visit, and an
+        alert already raised for it (recognition came late) is taken back, with
+        its clip, so employees never show as visitors."""
+        v.kind, v.employee_id = "employee", employee_id
+        if v.alert_ids:
+            for eid in v.alert_ids:
+                delete_event(eid)
+            log.info("visitors: visit %s on camera %s is an employee; removed %d alert(s)", v.key, camera_id, len(v.alert_ids))
+            v.alert_ids = []
+        else:
+            log.info("visitors: visit %s on camera %s is an employee (no alert)", v.key, camera_id)
+
+    def identify(self, camera_id: int, bbox, w: int, h: int) -> str | None:
+        """The enrolled person the face pipeline has identified at this box on
+        this camera, or None (not identified yet, or face recognition is not
+        running on the camera). Reads the pipeline's live tracks only: no
+        inference here. Boxes are compared as fractions of their own frame."""
+        from app import face_pipeline
+
+        pipe = face_pipeline.get_existing_pipeline(camera_id)
+        if pipe is None or not getattr(pipe, "frame_size", None):
+            return None
+        fw, fh = pipe.frame_size
+        mine = [bbox[0] / w, bbox[1] / h, bbox[2] / w, bbox[3] / h]
+        best, best_iou = None, EMPLOYEE_MATCH_IOU
+        for d in pipe.get_live_detections():
+            if not d.get("employee_id") or d.get("identity_source") not in EMPLOYEE_SOURCES:
+                continue
+            b = d["bbox"]
+            iou = _iou(mine, [b[0] / fw, b[1] / fh, b[2] / fw, b[3] / fh])
+            if iou >= best_iou:
+                best, best_iou = str(d["employee_id"]), iou
+        return best
+
+    def exclusion_available(self, camera_id: int) -> bool:
+        """Whether employees can be told apart on this camera right now."""
+        if not EXCLUDE_EMPLOYEES:
+            return False
+        from app import face_pipeline
+
+        return face_pipeline.get_existing_pipeline(camera_id) is not None
+
+    def _db_touch(self, visit_key: str, ts: float) -> None:
         try:
             with _conn() as conn:
-                conn.execute("UPDATE visitor_events SET last_in_zone_at = ? WHERE id = ?", (ts, event_id))
+                conn.execute("UPDATE visitor_events SET last_in_zone_at = ? WHERE visit_key = ? AND status = 'inside'", (ts, visit_key))
         except sqlite3.Error:
-            log.exception("visitors: could not update event %s", event_id)
+            log.exception("visitors: could not update visit %s", visit_key)
 
     def _close_departed(self, camera_id: int, now: float) -> None:
-        opens = self._open.get(camera_id, {})
-        for eid, o in list(opens.items()):
-            if now - o.last_in > EXIT_GRACE_SECONDS:
-                self._leave(camera_id, o, o.last_in, "tracked")
-            elif now - o.entered_at > MAX_PRESENCE_HOURS * 3600:
-                self._leave(camera_id, o, now, "assumed")
+        for v in list(self._open.get(camera_id, {}).values()):
+            if now - v.last_in > ABSENCE_GRACE_SECONDS:
+                self._leave(camera_id, v, v.last_in, "tracked")
+            elif now - v.entered_at > MAX_PRESENCE_HOURS * 3600:
+                self._leave(camera_id, v, now, "assumed")
 
     def _close_departed_all(self) -> None:
         now = time.time()
@@ -553,25 +690,26 @@ class VisitorService:
             for cid in list(self._open):
                 self._close_departed(cid, now)
 
-    def _leave(self, camera_id: int, o: _Open, left_at: float, how: str) -> None:
-        self._open.get(camera_id, {}).pop(o.event_id, None)
-        self._recent_left.setdefault(camera_id, []).append((o.bbox, left_at))
-        t = self._tracks.get(camera_id, {}).get(o.track_id)
+    def _leave(self, camera_id: int, v: _Visit, left_at: float, how: str) -> None:
+        self._open.get(camera_id, {}).pop(v.key, None)
+        t = self._tracks.get(camera_id, {}).get(v.track_id)
         if t is not None:
-            t.event_id = None
+            t.visit_key = None
             t.inside_looks = 0
+        log.info("visitors: visit %s left the area on camera %s (%s, %s)", v.key, camera_id, how, v.kind)
+        if not v.alert_ids:
+            return  # employees and people who never qualified leave nothing behind
         try:
             with _conn() as conn:
-                row = conn.execute("SELECT expires_at FROM visitor_events WHERE id = ?", (o.event_id,)).fetchone()
-                if row is None:
-                    return
                 conn.execute(
-                    "UPDATE visitor_events SET status = 'left', left_at = ?, departure = ?, last_in_zone_at = ?, expires_at = ? WHERE id = ?",
-                    (left_at, how, left_at, min(row["expires_at"], left_at + RETENTION_AFTER_DEPARTURE_HOURS * 3600), o.event_id),
+                    "UPDATE visitor_events SET status = 'left', left_at = ?, departure = ?, last_in_zone_at = ?, "
+                    "expires_at = MIN(expires_at, ?) WHERE visit_key = ? AND status = 'inside'",
+                    (left_at, how, left_at, left_at + RETENTION_AFTER_DEPARTURE_HOURS * 3600, v.key),
                 )
-            log.info("visitors: event %s - person left the area (%s)", o.event_id, how)
+                conn.execute("UPDATE visitor_report_log SET left_at = ?, departure = ? WHERE visit_key = ? AND left_at IS NULL",
+                             (left_at, how, v.key))
         except sqlite3.Error:
-            log.exception("visitors: could not close event %s", o.event_id)
+            log.exception("visitors: could not close visit %s", v.key)
 
     # ---- rolling buffer + clips ----------------------------------------------
 
@@ -653,8 +791,13 @@ class VisitorService:
         online = stream.state == camera_stream.S_RUNNING and stream.last_frame_at is not None and time.time() - stream.last_frame_at < 15
         zone = get_zone(camera_id)
         active = bool(zone and zone["enabled"] and analytics_settings.enabled(FEATURE))
+        kinds = [v.kind for v in list(self._open.get(camera_id, {}).values())]
         return {"online": online, "stream_state": stream.state, "zone": zone, "detection_active": active,
-                "inside_now": len(self._open.get(camera_id, {}))}
+                # visitors only: recognised employees are never counted as visitors
+                "inside_now": kinds.count("visitor"),
+                "employees_now": kinds.count("employee"),
+                "unverified_now": kinds.count("pending"),
+                "employee_exclusion": self.exclusion_available(camera_id)}
 
 
 def _encode_mp4(path: Path, jpegs: list[bytes], fps: int) -> None:
