@@ -1,5 +1,7 @@
 # SMC Client
 
+**Setting up on a new machine?** See [SETUP_REQUIREMENTS.md](SETUP_REQUIREMENTS.md) for everything to install and create.
+
 ## Ports
 
 SMC uses its own ports so it never clashes with the other projects on this
