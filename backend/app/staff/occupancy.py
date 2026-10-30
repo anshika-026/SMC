@@ -256,12 +256,36 @@ class StaffOccupancyManager:
 
     def maybe_end_of_day(self, now=None) -> int:
         now = now if now is not None else time.time()
+        closed = self._close_missed_end_of_day(now)
         dt = datetime.datetime.fromtimestamp(now)
         day = dt.date().isoformat()
         if dt.strftime("%H:%M") >= self.cfg["end_of_day"] and self._last_auto_exit_day != day:
             self._last_auto_exit_day = day
-            return self.auto_exit_all(now)
-        return 0
+            return closed + self.auto_exit_all(now)
+        return closed
+
+    def _close_missed_end_of_day(self, now: float) -> int:
+        """Visits still open from an EARLIER day: the end of day passed while
+        the backend was off, so they were never closed and would show as
+        "inside" forever. Each is closed at its own day's end-of-day time."""
+        today_start = _day_start(now)
+        hh, mm = (int(x) for x in self.cfg["end_of_day"].split(":"))
+        closed = 0
+        with self._lock:
+            for vid, v in list(self._present.items()):
+                if v["entry_time"] >= today_start:
+                    continue
+                day_end = datetime.datetime.fromtimestamp(v["entry_time"]).replace(hour=hh, minute=mm, second=0, microsecond=0).timestamp()
+                ts = max(day_end, v.get("last_seen") or v["entry_time"])
+                ts = min(ts, today_start - 1)
+                v.update(status=EXITED, exit_time=ts, last_seen=ts)
+                self._save_visit(v)
+                self._event(ts, "AUTO_EXIT", v, v.get("camera_id"), v.get("track_id"), None, None, "end of day (backend was off at the time)")
+                del self._present[vid]
+                closed += 1
+        if closed:
+            log.info("staff: closed %d visit(s) left open from an earlier day", closed)
+        return closed
 
     # ---- reporting --------------------------------------------------------------
 
@@ -279,7 +303,21 @@ class StaffOccupancyManager:
             q, p = q + f" AND camera_id IN ({','.join('?' * len(camera_ids)) or 'NULL'})", p + sorted(camera_ids)
         with _conn() as conn:
             by_type = dict(conn.execute(q + " GROUP BY event_type", p).fetchall())
+            # Peak number of people inside at once today, from the stored visits.
+            vq, vp = "SELECT entry_time, exit_time FROM staff_occupancy WHERE entry_time <= ? AND (exit_time IS NULL OR exit_time >= ?)", [now, start]
+            if camera_ids is not None:
+                vq, vp = vq + f" AND camera_id IN ({','.join('?' * len(camera_ids)) or 'NULL'})", vp + sorted(camera_ids)
+            visits = conn.execute(vq, vp).fetchall()
+        changes = sorted([(max(r[0], start), 1) for r in visits] + [(min(r[1] or now, now), -1) for r in visits],
+                         key=lambda c: (c[0], c[1]))   # an exit at the same moment counts first
+        peak, peak_at, inside = 0, None, 0
+        for ts, step in changes:
+            inside += step
+            if inside > peak:
+                peak, peak_at = inside, ts
         return {
+            "peak_inside_today": peak,
+            "peak_at": datetime.datetime.fromtimestamp(peak_at).isoformat(timespec="minutes") if peak_at else None,
             # Face recognition off: nobody can be told apart from a visitor, so
             # everyone inside is counted as staff (but never named).
             "current_staff_count": known + unknown if anonymous_mode else known,

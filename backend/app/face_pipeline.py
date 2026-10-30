@@ -903,6 +903,20 @@ class CameraFacePipeline:
                 lambda bbox: self._identify(frame, bbox),
             )
 
+        # Visitor Management (visitors.py): while someone in a visitor area is
+        # not yet known to be an employee, the faces inside their body box are
+        # identified here, so a seated employee is recognised without waiting
+        # for their face track to end and without anyone watching the overlay.
+        # Rate-limited and a no-op on cameras without such a person.
+        from app import visitors
+
+        if visitors.service.wants_faces(self.camera_id):
+            visitors.service.observe_faces(
+                self.camera_id, frame.shape,
+                [[float(v) for v in tracked.xyxy[i]] for i in range(len(tracked))],
+                lambda bbox: self._identify_face(frame, bbox),
+            )
+
         # Drop stale tracks and flush any that finished (left frame / went stale)
         # to recognition — this is where "best frame per track" pays off:
         # one embedding computed per person-appearance, not per frame.
@@ -1426,6 +1440,41 @@ class CameraFacePipeline:
         proba = clf.predict_proba(embedding.reshape(1, -1))[0]
         best = int(np.argmax(proba))
         return str(clf.classes_[best]), float(proba[best])
+
+    def _identify_face(self, frame: np.ndarray, bbox) -> tuple[str | None, float]:
+        """Employee id + confidence for one face box, with the live-overlay
+        rules (_identify_for_overlay: classifier, then the enrolment gallery,
+        each with its own threshold). (None, 0.0) when not confident."""
+        x1, y1, x2, y2 = (max(0, int(v)) for v in bbox)
+        px1, py1, px2, py2 = self._pad_bbox(x1, y1, x2, y2, frame.shape)
+        crop = frame[py1:py2, px1:px2]
+        if crop.size == 0:
+            return None, 0.0
+        self._ensure_models_loaded()
+        embedding = self._embed(crop)
+        if embedding is None:
+            return None, 0.0
+        return self._identify_for_overlay(embedding)
+
+    def _identify_head(self, frame: np.ndarray, head_box) -> tuple[str | None, float, str]:
+        """Identity for the head part of a body box (footfall): finds the face
+        in it first, then identifies that tight face box exactly like the
+        visitor and overlay paths (_identify_face). Handing the whole head area
+        to _identify_face instead pads it further and leaves the face too small
+        to match. Returns (employee | None, confidence, outcome) where outcome
+        is "no face" | "not confident" | "match"."""
+        self._ensure_models_loaded()
+        det = getattr(self._arcface, "det_model", None)
+        x1, y1, x2, y2 = (max(0, int(v)) for v in head_box)
+        crop = frame[y1:y2, x1:x2]
+        if det is None or crop.size == 0:
+            return None, 0.0, "no face"
+        faces, _ = det.detect(crop, input_size=(256, 256))
+        if faces is None or len(faces) == 0:
+            return None, 0.0, "no face"
+        fx1, fy1, fx2, fy2 = max(faces, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))[:4]
+        employee, confidence = self._identify_face(frame, [x1 + fx1, y1 + fy1, x1 + fx2, y1 + fy2])
+        return employee, confidence, "match" if employee else "not confident"
 
     def _identify_for_overlay(self, embedding: np.ndarray) -> tuple[str | None, float]:
         """Identity for ONE face embedding on the live overlay path, using

@@ -28,16 +28,16 @@ class World:
         self.identity = {}   # seat x -> employee id the face pipeline reports
         svc.identify = lambda cam, bbox, w, h: self.identity.get(bbox[0])
 
-    def look(self, people, ts=None):
+    def look(self, people, ts=None, camera_id=1):
         """people: {track_id: seat x}"""
         if ts is not None:
             self.now = ts
-        self.svc.process(1, AREA, W, H, [{"track_id": t, "bbox": seat(x), "confidence": 0.9} for t, x in people.items()], self.now)
+        self.svc.process(camera_id, AREA, W, H, [{"track_id": t, "bbox": seat(x), "confidence": 0.9} for t, x in people.items()], self.now)
 
-    def run(self, seconds, people, step=1.0):
+    def run(self, seconds, people, step=1.0, camera_id=1):
         end = self.now + seconds
         while self.now < end:
-            self.look(people)
+            self.look(people, camera_id=camera_id)
             self.now += step
 
     def alerts(self):
@@ -57,8 +57,10 @@ def world(isolated_db, tmp_path, monkeypatch):
     monkeypatch.setattr(visitors, "EXCLUDE_EMPLOYEES", True)
     visitors.init_db()
     svc = visitors.VisitorService()
-    svc._schedule_clip = lambda *a: None  # no video in tests
-    return World(svc)
+    w = World(svc)
+    w.clips = []
+    svc._schedule_clip = lambda event_id, camera_id, t0: w.clips.append(event_id)  # no video in tests
+    return w
 
 
 def test_1_enrolled_employee_never_alerts(world):
@@ -227,3 +229,148 @@ def test_identify_reads_the_face_pipeline_tracks(world, monkeypatch):
     assert svc.identify(1, seat(100), W, H) is None
     monkeypatch.setattr(face_pipeline, "get_existing_pipeline", lambda cid: None)
     assert svc.identify(1, seat(100), W, H) is None
+
+
+# ---- employee records, visit history, clips --------------------------------
+
+def test_employee_is_recorded_apart_from_visitors(world):
+    world.identity[100] = "EMP-7"
+    world.run(5 * MIN, {1: 100})
+    assert world.alerts() == [] and world.clips == [] and visitors.list_visits() == []
+    emp = visitors.list_employee_visits()
+    assert len(emp) == 1 and emp[0]["employee_id"] == "EMP-7" and emp[0]["status"] == "inside"
+    assert emp[0]["last_seen"] - emp[0]["arrived_at"] >= 4 * MIN
+    world.run(70, {})                               # leaves
+    emp = visitors.list_employee_visits()
+    assert len(emp) == 1 and emp[0]["status"] == "left"
+
+
+def test_one_visit_is_one_history_row_with_its_alerts(world):
+    world.run(65 * MIN, {1: 100})                   # alerts at ~0:10, 30:20, 60:30
+    v = visitors.list_visits()
+    assert len(v) == 1 and v[0]["alerts"] == 3 and v[0]["status"] == "inside"
+    assert v[0]["last_seen"] - v[0]["arrived_at"] >= 64 * MIN
+    assert v[0]["latest_event_id"] == world.alerts()[-1]["id"]
+    world.run(70, {})
+    v = visitors.list_visits()
+    assert len(v) == 1 and v[0]["status"] == "left" and v[0]["left_at"] is not None
+
+
+def test_one_clip_per_alert_never_per_detection(world):
+    world.run(29 * MIN, {1: 100})
+    assert len(world.clips) == 1                    # seated 29 min: one clip
+    world.run(2 * MIN, {1: 100})
+    assert len(world.clips) == 2 == len(world.alerts())   # next allowed alert, its own clip
+
+
+def test_leaving_and_returning_makes_two_visits(world):
+    world.run(12, {1: 100})
+    world.run(70, {})
+    world.run(12, {5: 100})
+    assert len(visitors.list_visits()) == 2
+
+
+def test_employee_on_several_cameras_never_becomes_a_visitor(world):
+    world.identity[100] = "EMP-7"
+    world.run(60, {1: 100}, camera_id=1)
+    world.run(60, {1: 100}, camera_id=2)
+    assert world.alerts() == [] and world.clips == []
+    assert sorted(r["camera_id"] for r in visitors.list_employee_visits()) == [1, 2]
+
+
+def test_history_survives_the_clip_retention(world):
+    world.run(12, {1: 100})
+    world.run(70, {})
+    visitors.purge_expired(now=world.now + 48 * 3600)   # clips and alert rows expire
+    assert world.alerts() == []
+    v = visitors.list_visits()
+    assert len(v) == 1 and v[0]["latest_event_id"] is None   # history kept, clip gone
+
+
+# ---- background face identification (no overlay viewer needed) -------------
+
+def _face_in(seat_x):
+    """A face box in the head part of seat(seat_x)'s body box."""
+    return [seat_x + 50, 420, seat_x + 100, 480]
+
+
+def test_face_identified_inside_a_seated_person_makes_them_an_employee(world, monkeypatch):
+    monkeypatch.setattr(visitors, "VERIFY_SECONDS", 0.0)
+    world.run(12, {1: 100})
+    assert len(world.alerts()) == 1                 # face not identified yet: alerted
+    calls = []
+
+    def identify(bbox):
+        calls.append(bbox)
+        return ("EMP-9", 0.95)
+
+    world.svc.observe_faces(1, (H, W, 3), [_face_in(100)], identify)
+    assert calls == [_face_in(100)]
+    assert world.alerts() == []                     # wrong alert taken back
+    assert [v["employee_id"] for v in visitors.list_employee_visits()] == ["EMP-9"]
+    world.run(40 * MIN, {1: 100})
+    assert world.alerts() == []
+    assert not world.svc.wants_faces(1) or all(v.kind == "employee" for v in world.svc._open[1].values())
+
+
+def test_faces_outside_the_seated_persons_head_are_not_used(world):
+    world.run(5, {1: 100})
+    calls = []
+    world.svc.observe_faces(1, (H, W, 3), [_face_in(500), [100, 750, 150, 790]], lambda b: calls.append(b) or ("EMP-9", 0.9))
+    assert calls == []                              # another seat, and a box at knee height
+    assert [v.kind for v in world.svc._open[1].values()] == ["pending"]
+
+
+def test_unrecognised_face_keeps_them_a_visitor(world):
+    world.run(5, {1: 100})
+    world.svc.observe_faces(1, (H, W, 3), [_face_in(100)], lambda b: (None, 0.0))
+    world.run(10, {1: 100})
+    assert len(world.alerts()) == 1
+
+
+def test_first_alert_waits_for_identification_where_recognition_runs(world, monkeypatch):
+    monkeypatch.setattr(visitors, "VERIFY_SECONDS", 20.0)
+    monkeypatch.setattr(world.svc, "exclusion_available", lambda cid: True)
+    world.run(15, {1: 100})
+    assert world.alerts() == []                     # 10 s gap passed, still identifying
+    world.run(8, {1: 100})
+    a = world.alerts()
+    assert len(a) == 1 and 20 <= a[0]["alert_at"] - T0 <= 23
+
+
+def test_after_a_restart_alerts_wait_for_recognition_to_start(world, monkeypatch):
+    monkeypatch.setattr(visitors, "VERIFY_SECONDS", 20.0)
+    monkeypatch.setattr(visitors, "RECOGNITION_STARTUP_WAIT_SECONDS", 180.0)
+    ready = {"on": False}
+    monkeypatch.setattr(world.svc, "exclusion_available", lambda cid: ready["on"])
+    monkeypatch.setattr(world.svc, "_recognition_expected", lambda cid: True)
+    world.run(60, {1: 100})                         # models still loading
+    assert world.alerts() == []
+    ready["on"] = True                              # recognition now running
+    world.run(15, {1: 100})
+    assert world.alerts() == []                     # its own 20 s window starts now
+    world.run(8, {1: 100})
+    assert len(world.alerts()) == 1
+
+
+def test_if_recognition_never_starts_the_alert_still_comes(world, monkeypatch):
+    monkeypatch.setattr(visitors, "RECOGNITION_STARTUP_WAIT_SECONDS", 180.0)
+    monkeypatch.setattr(world.svc, "exclusion_available", lambda cid: False)
+    monkeypatch.setattr(world.svc, "_recognition_expected", lambda cid: True)
+    world.run(170, {1: 100})
+    assert world.alerts() == []
+    world.run(15, {1: 100})
+    assert len(world.alerts()) == 1
+
+
+def test_kpis_count_visits_not_alerts_and_never_employees(world, monkeypatch):
+    import datetime as _dt
+    now = _dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).timestamp()
+    world.now = now - 70 * MIN
+    world.identity[500] = "EMP-1"
+    world.run(65 * MIN, {1: 100, 2: 500})          # a visitor (3 alerts) and an employee, 65 min
+    k = visitors.kpis(now=now)
+    assert k["visitors_today"] == 1                 # one visit, however many alerts
+    assert k["long_stays"] == 1 and k["waiting_now"] == 1
+    assert 64 * MIN <= k["average_stay_seconds"] <= 66 * MIN
+    assert k["employees_seen_today"] == 1

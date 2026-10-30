@@ -288,7 +288,7 @@ export default function Alerts() {
               <Row label="Location" value={selected.location} />
               <Row label="Timestamp" value={`${selected.date} · ${selected.time}`} />
               <Row label="Severity" value={selected.severity} />
-              {selected.confidence != null && selected.event === "Unknown Person" && (
+              {selected.confidence != null && selected.event === "Person" && (
                 <Row label="Closest employee match" value={`${Math.round(selected.confidence * 100)}%`} />
               )}
               {selected.occurrences > 1 && <Row label="Seen again" value={`${selected.occurrences - 1}× · last at ${selected.lastSeen}`} />}

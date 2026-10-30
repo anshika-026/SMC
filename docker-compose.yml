@@ -29,6 +29,9 @@ services:
       MODEL_DIR: /app/models
       INSIGHTFACE_ROOT: /insightface
       OMP_NUM_THREADS: "2"
+      # Local time for attendance times, the late-arrival cut-off, "today" and
+      # hourly charts (the container is UTC otherwise, 5.5 h off in India).
+      TZ: ${TZ:-Asia/Kolkata}
       # RTMP push (see backend/app/ingest.py). Values come from SMC\.env (never
       # committed); RTMP_PUBLIC_HOST must be the address cameras can reach.
       RTMP_PUBLIC_HOST: ${RTMP_PUBLIC_HOST:-}

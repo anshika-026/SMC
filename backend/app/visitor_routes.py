@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import audit, auth, camera_db, camera_stream, visitors
+from app import audit, auth, camera_db, camera_stream, employee_directory, visitors
 
 router = APIRouter(prefix="/api/visitors", tags=["visitors"], dependencies=[Depends(auth.require_admin)])
 
@@ -78,6 +78,28 @@ def clear_zone(camera_id: int, principal: dict = Depends(auth.require_admin)):
 @router.get("/events")
 def list_events(camera_id: int | None = None, after_id: int | None = None, limit: int = Query(50, ge=1, le=200)):
     return {"events": visitors.list_events(camera_id, limit, after_id)}
+
+
+@router.get("/kpis")
+def visitor_kpis():
+    """Today's KPI cards (visitors = visits; employees never counted)."""
+    return visitors.kpis()
+
+
+@router.get("/visits")
+def list_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=500)):
+    """Visitor history, one row per visit (repeat alerts grouped)."""
+    return {"visits": visitors.list_visits(camera_id, limit)}
+
+
+@router.get("/employee-visits")
+def list_employee_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=500)):
+    """Registered employees seen in a visitor area: kept apart from visitors,
+    never alerted."""
+    rows = visitors.list_employee_visits(camera_id, limit)
+    for r in rows:
+        r["name"] = employee_directory.get_display(r["employee_id"])[0] or r["employee_id"]
+    return {"visits": rows}
 
 
 @router.get("/events/{event_id}")

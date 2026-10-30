@@ -216,8 +216,8 @@ def unknown_face(camera_id: int, best_score: float, crop_jpeg: bytes | None) -> 
     if now - _last_unknown.get(camera_id, 0) < UNKNOWN_COOLDOWN_SECONDS:
         return
     _last_unknown[camera_id] = now
-    raise_alert("Unknown Person", "High", camera_id,
-                message=f"A face at {cam.get('name', 'the gate')} didn't match any employee",
+    raise_alert("Person", "High", camera_id,
+                message=f"A person at {cam.get('name', 'the gate')} is not a registered employee",
                 confidence=best_score, snapshot_jpeg=crop_jpeg, now=now)
 
 

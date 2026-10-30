@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import Modal from "./Modal";
-import ZoneEditor from "./ZoneEditor";
+import FootfallGateEditor from "./FootfallGateEditor";
 import * as api from "../api/client";
 
-// Footfall > Add camera: pick a camera, drag a box over the area to count in,
-// save. The camera becomes a footfall gate and starts counting straight away
-// (backend/app/footfall_routes.py). Opened with `initialCameraId` it edits that
-// camera's area instead.
+// Footfall > Add camera: pick a camera, draw the ENTRY LINE across its gate
+// (and optionally an area around it), save. The camera becomes a footfall gate
+// and counts the people who walk in through it (backend/app/footfall.py).
+// Opened with `initialCameraId` it edits that gate instead.
 export default function FootfallAddCamera({ open, onClose, gates, initialCameraId = null, onDone }) {
   const [cameras, setCameras] = useState([]);
   const [cameraId, setCameraId] = useState(null);
@@ -25,10 +25,19 @@ export default function FootfallAddCamera({ open, onClose, gates, initialCameraI
   if (!open) return null;
   const counting = new Map((gates || []).map((g) => [g.camera_id, g]));
   const camera = cameras.find((c) => c.id === cameraId);
-  const gate = camera ? { camera_id: camera.id, name: camera.label, zone: counting.get(camera.id)?.zone || null } : null;
+  const existing = camera ? counting.get(camera.id) : null;
+  const gate = camera
+    ? {
+        camera_id: camera.id,
+        name: camera.label,
+        zone: existing?.zone || null,
+        entry_line: existing?.entry_line || null,
+        inside_sign: existing?.inside_sign ?? 1,
+      }
+    : null;
 
   return (
-    <Modal open={open} onClose={onClose} title={initialCameraId ? "Edit counting area" : "Add camera to footfall"} width="max-w-3xl">
+    <Modal open={open} onClose={onClose} title={initialCameraId ? "Edit gate" : "Add gate camera to footfall"} width="max-w-3xl">
       <div className="space-y-4">
         {!initialCameraId && (
           <div>
@@ -52,22 +61,9 @@ export default function FootfallAddCamera({ open, onClose, gates, initialCameraI
         )}
         {error && <p className="text-sm text-danger-500">{error}</p>}
         {gate ? (
-          <>
-            <p className="text-sm text-slate-500">
-              Drag a box over the area to count in. Only people inside it are counted. Saving adds this camera to footfall and
-              starts counting.
-            </p>
-            <ZoneEditor
-              key={gate.camera_id}
-              gate={gate}
-              saveLabel="Save area & start counting"
-              savedMessage="Saved. Footfall is now counting in this area."
-              onSave={(roi) => api.addFootfallCamera(gate.camera_id, roi)}
-              onSaved={() => onDone?.()}
-            />
-          </>
+          <FootfallGateEditor key={gate.camera_id} gate={gate} onSaved={() => onDone?.()} />
         ) : (
-          !error && <p className="text-sm text-slate-400">Pick a camera to mark its counting area.</p>
+          !error && <p className="text-sm text-slate-400">Pick a camera to mark its gate.</p>
         )}
       </div>
     </Modal>

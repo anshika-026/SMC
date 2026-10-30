@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Bug, DoorOpen, RotateCcw } from "lucide-react";
+import { Bug, Building2, DoorOpen, RotateCcw } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
+import KpiPanel from "../components/KpiPanel";
 import DataTable from "../components/DataTable";
 import StatusBadge from "../components/StatusBadge";
 import Modal from "../components/Modal";
@@ -95,7 +96,7 @@ export default function StaffCount() {
   const anonymous = count?.mode === "anonymous";
   const rows = people.map((p) => ({
     id: p.visit_id || p.employee_id,
-    name: p.employee_name || (p.employee_id ? p.employee_id : "Unknown person"),
+    name: p.employee_name || (p.employee_id ? p.employee_id : "Person"),
     status: p.status === "PRESENT" ? "Present" : "Exited",
     entered: clock(p.entry_time),
     lastSeen: clock(p.last_seen),
@@ -134,6 +135,25 @@ export default function StaffCount() {
         </p>
       )}
 
+      <KpiPanel
+        icon={Building2}
+        title="Staff Counting"
+        items={[
+          {
+            label: "People inside now",
+            value: count ? String(count.total_persons) : null,
+            sub: count ? `${count.total_entries_today} entries · ${count.total_exits_today} exits today` : null,
+          },
+          { label: "Employees inside", value: count ? String(count.known_staff) : null, sub: "recognised by face" },
+          { label: "Other persons inside", value: count ? String(count.unknown_persons) : null, sub: "not matched to an employee", tone: "warn" },
+          {
+            label: "Peak inside today",
+            value: count ? String(count.peak_inside_today ?? 0) : null,
+            sub: count?.peak_at ? `at ${count.peak_at.slice(11, 16)}` : "most people inside at once",
+          },
+        ]}
+      />
+
       <div className="grid md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-4">
         <div className="card p-6 flex flex-col justify-center">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Current staff</p>
@@ -144,7 +164,7 @@ export default function StaffCount() {
           <StatCard label="Entries today" value={count?.total_entries_today ?? "—"} subTone="neutral" />
           <StatCard label="Exits today" value={count?.total_exits_today ?? "—"} subTone="neutral" />
           <StatCard label="Known staff inside" value={count?.known_staff ?? "—"} subTone="neutral" />
-          <StatCard label="Unknown persons" value={count?.unknown_persons ?? "—"} sub="not matched to an employee" subTone="danger" />
+          <StatCard label="Other persons" value={count?.unknown_persons ?? "—"} sub="not matched to an employee" subTone="danger" />
           <StatCard label="Total persons" value={count?.total_persons ?? "—"} subTone="neutral" />
           <StatCard
             label="Duplicates prevented"
@@ -193,7 +213,7 @@ export default function StaffCount() {
             columns={[
               { key: "time", label: "Time", render: (e) => clock(e.ts) },
               { key: "event", label: "Event", render: (e) => EVENT_LABEL[e.event_type] || e.event_type },
-              { key: "who", label: "Person", render: (e) => e.employee_name || e.employee_id || "Unknown" },
+              { key: "who", label: "Person", render: (e) => e.employee_name || e.employee_id || "Person" },
               { key: "cam", label: "Camera", render: (e) => e.camera_name || "-" },
               { key: "track", label: "Track", render: (e) => (e.track_id != null ? `#${e.track_id}` : "-") },
               { key: "how", label: "Matched by", render: (e) => e.identity_source || "-" },

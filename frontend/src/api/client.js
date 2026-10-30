@@ -107,9 +107,9 @@ export async function logoutAdmin() {
 // Real: /dashboard/summary (backend/app/insights.py) + footfall. Guests and
 // Guests have no backend yet, so that card says so instead of showing
 // sample numbers.
-export async function getDashboardStats() {
+export async function getDashboardStats(date) {
   const [summary, footfall, alertSummary, staff] = await Promise.all([
-    request("/dashboard/summary"),
+    request(`/dashboard/summary${date ? `?date=${encodeURIComponent(date)}` : ""}`),
     getFootfallSummary().catch(() => null),
     getAlertsSummary().catch(() => null),
     featureOn("staff_count") ? request("/staff/count").catch(() => null) : null,
@@ -140,6 +140,8 @@ export async function getDashboardStats() {
     },
     needsAttention: summary.needs_attention,
     aiInsights: summary.insights,
+    // Business overview for the chosen date (backend insights.business_overview).
+    business: summary.business,
   };
 }
 
@@ -153,7 +155,8 @@ function mapAlert(a) {
     ts: a.ts,
     date: d.toLocaleDateString(undefined, { day: "numeric", month: "short" }),
     time: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    event: a.event,
+    // Nobody is ever shown as "Unknown": older alerts stored under that name read "Person".
+    event: a.event === "Unknown Person" ? "Person" : a.event,
     severity: a.severity,
     status: a.status,
     camera: a.camera_name,
@@ -567,6 +570,34 @@ export async function getAttendanceDay(date) {
 export async function getAttendanceHistory(employeeId, days = 14) {
   return request(`/attendance/${encodeURIComponent(employeeId)}/history?days=${days}`);
 }
+// ---- Workforce management (backend/app/workforce.py, /api/attendance/...) ----
+// Policy, holidays, leave & WFH requests, balances and the classified day.
+// All HR/admin: requests are entered and decided on employees' behalf.
+function qs(params) {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => v !== undefined && v !== null && v !== "" && q.set(k, String(v)));
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+export const hr = {
+  overview: ({ date, department, kpi } = {}) => request(`/attendance/overview${qs({ date, department, kpi })}`),
+  range: ({ from, to, employeeId }) => request(`/attendance/range${qs({ date_from: from, date_to: to, employee_id: employeeId })}`),
+  policy: () => request("/attendance/policy"),
+  savePolicy: (changes) => request("/attendance/policy", { method: "PUT", body: JSON.stringify(changes) }),
+  holidays: (year) => request(`/attendance/holidays${qs({ year })}`),
+  addHoliday: (h) => request("/attendance/holidays", { method: "POST", body: JSON.stringify(h) }),
+  editHoliday: (id, h) => request(`/attendance/holidays/${id}`, { method: "PUT", body: JSON.stringify(h) }),
+  deleteHoliday: (id) => request(`/attendance/holidays/${id}`, { method: "DELETE" }),
+  leaveTypes: () => request("/attendance/leave-types"),
+  saveLeaveType: (t) => request("/attendance/leave-types", { method: "PUT", body: JSON.stringify(t) }),
+  balances: (year) => request(`/attendance/balances${qs({ year })}`),
+  setAllocation: (a) => request("/attendance/balances", { method: "PUT", body: JSON.stringify(a) }),
+  allocateDefaults: (year) => request(`/attendance/balances/allocate-defaults${qs({ year })}`, { method: "POST" }),
+  requests: (filters = {}) => request(`/attendance/requests${qs(filters)}`),
+  addRequest: (r) => request("/attendance/requests", { method: "POST", body: JSON.stringify(r) }),
+  decide: (id, decision, note = "") =>
+    request(`/attendance/requests/${id}/decision`, { method: "POST", body: JSON.stringify({ decision, note }) }),
+};
 export async function markLeave({ employeeId, from, to, reason }) {
   return request("/attendance/leave", {
     method: "POST",
@@ -623,6 +654,14 @@ export async function setFootfallZone(cameraId, roi) {
 }
 // Add a camera to footfall with its counting area (roi, or null = whole view);
 // counting starts right away. Calling it again for the same camera moves the area.
+// Entry line across a footfall gate + which side is inside (+1/-1): only people
+// crossing it from outside to inside are counted. line null = count the area.
+export async function setFootfallEntry(cameraId, line, insideSign) {
+  return request(`/footfall/cameras/${cameraId}/entry`, {
+    method: "PUT",
+    body: JSON.stringify({ entry_line: line, inside_sign: insideSign }),
+  });
+}
 export async function addFootfallCamera(cameraId, roi) {
   return request(`/footfall/cameras/${cameraId}`, { method: "POST", body: JSON.stringify({ roi }) });
 }
@@ -642,6 +681,20 @@ export async function fetchFootfallSnapshotObjectUrl(snapshotId) {
   const res = await fetch(`${BASE_URL}/footfall/snapshots/${snapshotId}`, { headers: { ...authHeaders() } });
   if (res.status === 401) handleAuthFailure();
   if (!res.ok) throw new Error(`Could not load snapshot (${res.status})`);
+  return URL.createObjectURL(await res.blob());
+}
+// The ~10 s clip of a counted person, as a blob URL (a <video> tag cannot
+// send the Authorization header). The error carries the server's sentence
+// and .status (409 = still recording, 410 = deleted after 24 h).
+export async function fetchFootfallClipObjectUrl(clipId) {
+  const res = await fetch(`${BASE_URL}/footfall/clips/${clipId}`, { headers: { ...authHeaders() } });
+  if (res.status === 401) handleAuthFailure();
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const err = new Error(body?.detail || `Could not load the clip (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return URL.createObjectURL(await res.blob());
 }
 
@@ -1001,6 +1054,22 @@ export async function deleteVisitorEvent(id) {
 export async function getVisitorSettings() {
   return request("/visitors/settings");
 }
+// Visitor history: one row per visit (repeat alerts grouped), and registered
+// employees seen in a visitor area (kept apart, never alerted).
+// Today's KPI cards: visitors (visits, not alerts), average stay, long stays, still waiting.
+export async function getVisitorKpis() {
+  return request("/visitors/kpis");
+}
+export async function getVisitorVisits({ cameraId, limit = 100 } = {}) {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (cameraId) q.set("camera_id", String(cameraId));
+  return request(`/visitors/visits?${q}`);
+}
+export async function getVisitorAreaEmployeeVisits({ cameraId, limit = 100 } = {}) {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (cameraId) q.set("camera_id", String(cameraId));
+  return request(`/visitors/employee-visits?${q}`);
+}
 // A <video> tag cannot send the Authorization header, so the clip is fetched
 // with it as a blob. Errors carry .status (409 = still recording, 410 =
 // deleted, 404 = no clip). Caller must URL.revokeObjectURL the result.
@@ -1015,3 +1084,76 @@ export async function fetchVisitorClipObjectUrl(id) {
   }
   return URL.createObjectURL(await res.blob());
 }
+
+// ---- Visitor records (backend/app/visitor_registry.py) ---------------------
+// Visitor profiles, visits, entry/exit/meeting times, camera detections the
+// operator links, consented snapshots, KPIs, analytics and exports. Admin only.
+async function vrBlob(path) {
+  const res = await fetch(`${BASE_URL}/visitor-records${path}`, { headers: { ...authHeaders() } });
+  if (res.status === 401) handleAuthFailure();
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const err = new Error(body?.detail || `Could not load (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+const vrJson = (path, method, body) =>
+  request(`/visitor-records${path}`, body === undefined ? { method } : { method, body: JSON.stringify(body) });
+export const vr = {
+  settings: () => request("/visitor-records/settings"),
+  saveSettings: (s) => vrJson("/settings", "PUT", s),
+  hosts: () => request("/visitor-records/hosts"),
+  cameras: () => request("/visitor-records/cameras"),
+  match: (q) => vrJson("/match", "POST", q),
+  // Resolves to the visit; a likely duplicate rejects with err.status 409 and err.matches.
+  register: async (data) => {
+    const res = await fetch(`${BASE_URL}/visitor-records/visits`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (res.status === 401) handleAuthFailure();
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const err = new Error(body?.detail || `Request failed (${res.status})`);
+      err.status = res.status;
+      err.matches = body?.matches || [];
+      throw err;
+    }
+    return body;
+  },
+  visits: (f = {}) => request(`/visitor-records/visits${qs(f)}`),
+  visit: (id) => request(`/visitor-records/visits/${id}`),
+  recordTime: (id, kind, ts, note) => vrJson(`/visits/${id}/times`, "POST", { kind, ts, note }),
+  correct: (id, kind, ts, note) => vrJson(`/visits/${id}/correct`, "POST", { kind, ts, note }),
+  cancel: (id, note) => vrJson(`/visits/${id}/cancel`, "POST", { note }),
+  deleteVisit: (id) => vrJson(`/visits/${id}`, "DELETE"),
+  candidates: (id) => request(`/visitor-records/visits/${id}/candidates`),
+  link: (id, ref) => vrJson(`/visits/${id}/link`, "POST", { ref }),
+  snapshot: (id, cameraId) => vrJson(`/visits/${id}/snapshot`, "POST", { camera_id: cameraId || null }),
+  detections: (day) => request(`/visitor-records/detections${qs({ day })}`),
+  deleteMedia: (id) => vrJson(`/media/${id}`, "DELETE"),
+  // Snapshot/clip as a blob URL (img/video tags cannot send the auth header). Caller revokes it.
+  mediaUrl: async (id) => URL.createObjectURL(await (await vrBlob(`/media/${id}`)).blob()),
+  visitors: (f = {}) => request(`/visitor-records/visitors${qs(f)}`),
+  profile: (id) => request(`/visitor-records/visitors/${id}`),
+  updateProfile: (id, fields) => vrJson(`/visitors/${id}`, "PATCH", fields),
+  eraseVisitor: (id) => vrJson(`/visitors/${id}`, "DELETE"),
+  kpis: (day) => request(`/visitor-records/kpis${qs({ day })}`),
+  analytics: (from, to) => request(`/visitor-records/analytics${qs({ from, to })}`),
+  // Downloads the export through the browser (format: csv | xlsx).
+  download: async (format, filters = {}) => {
+    const res = await vrBlob(`/export${qs({ ...filters, format })}`);
+    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || `visitor-records.${format}`;
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  },
+};

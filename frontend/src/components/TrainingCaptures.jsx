@@ -42,7 +42,7 @@ function pct(c) {
   return typeof c === "number" ? `${Math.round(c * 100)}%` : "—";
 }
 function predictedLabel(c) {
-  if (!c.predicted_name) return "Unknown";
+  if (!c.predicted_name) return "Person";
   return `${c.predicted_name} ${pct(c.confidence)}`;
 }
 function personLabel(p) {
@@ -269,7 +269,7 @@ function CaptureDetail({ cap, index, count, people, busy, error, onPrev, onNext,
         </div>
 
         <div>
-          <Row k="Predicted" v={cap.predicted_name ? `${cap.predicted_name} (ID ${cap.predicted_employee_id})` : "Unknown"} />
+          <Row k="Predicted" v={cap.predicted_name ? `${cap.predicted_name} (ID ${cap.predicted_employee_id})` : "Person"} />
           <Row k="Confidence" v={pct(cap.confidence)} />
           <Row k="Prediction tier" v={cap.prediction_tier} />
           <Row k="Review status" v={STATUS_LABEL[cap.label_status] || cap.label_status} />

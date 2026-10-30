@@ -39,6 +39,23 @@ def footfall_snapshot(snapshot_id: int, _: dict = Depends(auth.require_admin)):
     return FileResponse(path, media_type="image/jpeg")
 
 
+@router.get("/clips/{clip_id}")
+def footfall_clip(clip_id: int, _: dict = Depends(auth.require_admin)):
+    """The ~10 s clip of a counted person (5 s before, 5 s after they were
+    first counted that day). Supports Range, so it plays and seeks."""
+    path, reason = service.clip_file(clip_id)
+    if path is None:
+        status, detail = {
+            "missing": (404, "Clip not found"),
+            "pending": (409, "The clip is still being recorded - try again in a few seconds"),
+            "expired": (410, "This clip has been deleted (footfall clips are removed after 24 hours)"),
+            "failed": (404, "No clip was recorded for this person"),
+            "file_missing": (404, "The clip file is missing"),
+        }[reason]
+        raise HTTPException(status_code=status, detail=detail)
+    return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
+
+
 @router.post("/reset")
 def footfall_reset(_: dict = Depends(auth.require_admin)):
     """UAT: restart the unique count from zero. Deletes every Re-ID identity
@@ -102,6 +119,32 @@ def footfall_add_camera(camera_id: int, payload: ZoneIn, principal: dict = Depen
         pass
     audit.record("footfall.camera_add", principal, target=f"camera:{camera_id}", area=bool(roi), was_gate=was_gate)
     return {"camera_id": camera_id, "name": cam["name"], "roi": service.get_zone(camera_id), "counting": True}
+
+
+class EntryIn(BaseModel):
+    # The line across the gate, [[x1, y1], [x2, y2]] fractions of the frame
+    # (where feet cross), and which side is inside (+1 / -1). null line =
+    # count everyone in the area again.
+    entry_line: list[list[float]] | None = None
+    inside_sign: int = 1
+
+
+@router.put("/cameras/{camera_id}/entry")
+def footfall_set_entry(camera_id: int, payload: EntryIn, principal: dict = Depends(auth.require_admin)):
+    """With an entry line, only people who cross it from outside to inside
+    are counted (and get a clip and a name); people walking past or standing
+    outside are not."""
+    if camera_db.get_camera(camera_id) is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    line = payload.entry_line
+    if line is not None:
+        if len(line) != 2 or any(len(p) != 2 or not (0 <= p[0] <= 1 and 0 <= p[1] <= 1) for p in line):
+            raise HTTPException(status_code=422, detail="The entry line needs 2 [x, y] points between 0 and 1")
+        if abs(line[0][0] - line[1][0]) + abs(line[0][1] - line[1][1]) < 0.02:
+            raise HTTPException(status_code=422, detail="The entry line is too short - click two points across the gate")
+    service.set_entry_line(camera_id, line, 1 if payload.inside_sign >= 0 else -1)
+    audit.record("footfall.entry_line", principal, target=f"camera:{camera_id}", line=bool(line))
+    return {"camera_id": camera_id, **service.get_entry(camera_id)}
 
 
 @router.delete("/cameras/{camera_id}")

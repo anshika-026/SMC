@@ -57,7 +57,7 @@ models.apply_offline_environment()
 from . import audit, auth, camera_db, camera_stream, employee_directory, face_collection, face_db, face_pipeline, face_training_scheduler, license_db, ratelimit  # noqa: E402
 from .staff import routes as staff_routes  # noqa: E402
 from .staff.service import service as staff_service  # noqa: E402
-from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, ingest, license_routes, rtsp_reader, stream_source, visitor_routes, visitors  # noqa: E402
+from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, ingest, license_routes, rtsp_reader, stream_source, visitor_registry, visitor_registry_routes, visitor_routes, visitors  # noqa: E402
 from . import health_routes, heap, lifecycle, person_detection, retention  # noqa: E402
 from .ratelimit import SlidingWindowLimiter  # noqa: E402
 
@@ -149,6 +149,7 @@ app.include_router(insights_routes.router)
 app.include_router(alerts_routes.router)
 app.include_router(analytics_routes.router)
 app.include_router(visitor_routes.router)
+app.include_router(visitor_registry_routes.router)
 app.include_router(staff_routes.router)
 app.include_router(health_routes.router)
 staff_routes.register_websockets(app)
@@ -197,8 +198,12 @@ def init_databases() -> None:
             raise RuntimeError(msg)
         log.warning(msg)
     attendance.init_db()
+    from app import workforce
+
+    workforce.init_db()   # policy, holidays, leave types/allocations/requests (additive tables)
     alerts.init_db()
     visitors.init_db()
+    visitor_registry.init_db()   # visitor profiles, visits, visit events, visit media (additive tables)
     desk_db.init_db()
 
 
@@ -224,6 +229,8 @@ def start_services() -> None:
     alerts.start()
     # Visitor Management: entry events, 10 s clips and the 24 h clean-up (see visitors.py).
     visitors.service.start()
+    # Visitor records: expired snapshot/clip clean-up (see visitor_registry.py).
+    visitor_registry.start()
     # Staff Count at entrance cameras (see app/staff/).
     staff_service.start()
     # Hourly cleanup of expired sessions, old captures/snapshots, backups (retention.py).

@@ -46,5 +46,5 @@ def test_unknown_face_only_at_gates_only_when_clearly_unknown_and_rate_limited()
     alerts.unknown_face(8, 0.2, b"jpg")       # stranger at the gate: alert, with snapshot
     alerts.unknown_face(8, 0.1, b"jpg")       # within the cooldown: ignored
     rows = alerts.list_alerts("all")
-    assert len(rows) == 1 and rows[0]["event"] == "Unknown Person" and rows[0]["has_snapshot"]
+    assert len(rows) == 1 and rows[0]["event"] == "Person" and rows[0]["has_snapshot"]   # never "Unknown"
     assert alerts.snapshot_path(rows[0]["id"]).read_bytes() == b"jpg"

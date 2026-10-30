@@ -88,7 +88,12 @@ def svc(tmp_path, monkeypatch):
         {"id": 7, "name": "Lobby", "purpose": "GENERAL", "host": "x"},
     ])
     reid_db.init_db()
+    # No real video here: record clip requests instead of encoding them.
+    service_clips = []
+    monkeypatch.setattr(footfall.clips.recorder, "schedule",
+                        lambda camera_id, t0, final, on_done, max_dir_mb=None: service_clips.append((camera_id, t0, final, on_done)))
     service = footfall.FootfallService()
+    service.clip_requests = service_clips
     service._gallery = footfall._SharedGallery()
     service.scenes = {}
     for cid in (GATE_1, GATE_2, GATE_3):
@@ -163,9 +168,9 @@ def test_enroll_recheck_matches_identity_created_by_another_gate(svc):
         {"embedding": another_view(person_embedding(1), 500 + i).tolist(), "quality_score": 0.8, "crop_jpeg": None}
         for i in range(3)
     ]
-    pid = svc._enroll(GATE_2, {"track_id": 42, "confidence": 0.9}, samples, now=__import__("time").time())
+    pid, created = svc._enroll(GATE_2, {"track_id": 42, "confidence": 0.9}, samples, now=__import__("time").time())
     assert reid_db.count_unique_lifetime() == 1
-    assert pid == reid_db.list_persons()[0]["id"]
+    assert pid == reid_db.list_persons()[0]["id"] and not created
 
 
 def test_non_gate_cameras_are_not_in_the_breakdown(svc):

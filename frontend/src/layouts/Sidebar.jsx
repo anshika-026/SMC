@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   Gauge,
-  ScanEye,
   MonitorPlay,
   Siren,
   Fingerprint,
@@ -16,6 +15,7 @@ import {
   Cctv,
   MapPinned,
   IdCard,
+  CalendarCheck,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import * as api from "../api/client";
@@ -38,7 +38,6 @@ const NAV_SECTIONS = [
     title: "Monitoring",
     items: [
       { to: "/live-feed", label: "Live Feed", icon: MonitorPlay },
-      { to: "/live-camera", label: "AI Analytics", icon: ScanEye, analytics: "live_overlay" },
       { to: "/alerts", label: "Alerts & Events", icon: Siren, badgeKey: "alerts", analytics: "alerts" },
     ],
   },
@@ -53,6 +52,8 @@ const NAV_SECTIONS = [
     items: [
       { to: "/workforce", label: "Workforce Insights", icon: TrendingUp, requiresFeature: "workforce_analytics", analytics: "desk_analytics" },
       { to: "/face-recognition", label: "Face Recognition", icon: ScanFace, requiresFeature: "attendance", analytics: "face_recognition" },
+      // Attendance is built from face recognition sightings (backend/app/attendance.py).
+      { to: "/attendance", label: "Attendance", icon: CalendarCheck, requiresFeature: "attendance", analytics: "face_recognition" },
       { to: "/visitors", label: "Visitor Management", icon: Contact, requiresFeature: "footfall_analytics", analytics: "visitors" },
       { to: "/staff", label: "Staff Counting", icon: Users, requiresFeature: "attendance", analytics: "staff_count" },
       { to: "/footfall", label: "Footfall", icon: Footprints, requiresFeature: "footfall_analytics", analytics: "footfall" },
@@ -72,7 +73,7 @@ const NAV_SECTIONS = [
 
 // Analytics without a page of their own, switched from the CPU panel.
 const EXTRA_SWITCHES = [
-  ["expression", "Expression detection", "Reads facial expressions on the live person boxes (needs AI Analytics on)."],
+  ["expression", "Expression detection", "Reads facial expressions on the live person boxes (needs the live AI overlay on)."],
   [
     "appearance_handoff",
     "Name by appearance",

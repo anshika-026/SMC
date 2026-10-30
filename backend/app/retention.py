@@ -224,7 +224,29 @@ def purge_footfall_pictures(now: float | None = None) -> int:
     if FOOTFALL_PICTURE_HOURS <= 0:
         return 0
     now = now if now is not None else time.time()
-    return _purge_rows("reid_snapshots", "file_path", "created_at < ?", (now - FOOTFALL_PICTURE_HOURS * 3600,))
+    cutoff = now - FOOTFALL_PICTURE_HOURS * 3600
+    return _purge_rows("reid_snapshots", "file_path", "created_at < ?", (cutoff,)) + purge_footfall_clips(cutoff)
+
+
+def purge_footfall_clips(cutoff: float) -> int:
+    """Footfall clips follow the pictures' lifetime: the file goes, the row
+    stays (the person, their name and when they were counted) marked expired."""
+    from app.reid import reid_db
+
+    clips_root = (Path(config.DATA_DIR) / "footfall_clips").resolve()
+    with reid_db.get_connection() as conn:
+        rows = conn.execute("SELECT id, clip_path FROM footfall_clips WHERE ts < ? AND clip_status != 'expired'", (cutoff,)).fetchall()
+        conn.executemany("UPDATE footfall_clips SET clip_status = 'expired', clip_path = NULL WHERE id = ?", [(r[0],) for r in rows])
+    for _id, rel in rows:
+        if not rel:
+            continue
+        path = (Path(config.DATA_DIR) / rel).resolve()
+        if path.parent.parent == clips_root:   # never outside the clips folder
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                log.exception("could not delete footfall clip %s", path)
+    return len(rows)
 
 
 def _start_footfall_purge() -> None:

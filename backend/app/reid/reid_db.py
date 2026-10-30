@@ -33,6 +33,8 @@ TRACK_STATE_CONFIRMED = "confirmed"
 
 EVENT_NEW_PERSON = "new_person"
 EVENT_SIGHTING = "sighting"
+# Someone crossing an entry-line gate outwards (footfall): no person, only the time.
+EVENT_EXIT = "exit"
 
 
 def get_connection():
@@ -125,6 +127,28 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_footfall_history_ts ON footfall_history(ts)")
+        # One row per counted person per day: the ~10 s clip of the moment they
+        # were first counted that day, and the registered employee face
+        # recognition confirmed them as (NULL = unknown). UNIQUE, so the same
+        # person seen again never gets a second clip that day.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS footfall_clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                person_id INTEGER NOT NULL,
+                day TEXT NOT NULL,              -- local date, YYYY-MM-DD
+                camera_id INTEGER NOT NULL,
+                ts REAL NOT NULL,               -- when they were first counted that day
+                employee_id TEXT,
+                employee_confidence REAL,
+                clip_path TEXT,
+                clip_status TEXT NOT NULL DEFAULT 'pending',   -- pending | ready | failed | expired
+                clip_error TEXT,
+                clip_frames INTEGER,
+                UNIQUE (person_id, day)
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reid_events_camera_ts ON reid_events(camera_id, ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reid_events_person_ts ON reid_events(person_id, ts)")
         conn.execute(
@@ -140,6 +164,15 @@ def init_db() -> None:
             )
             """
         )
+        # Footfall counts people who ENTER through the gate: the line across it
+        # ([[x1, y1], [x2, y2]], fractions of the frame) and which side of it is
+        # inside (+1 / -1, the staff-count convention). NULL = count everyone in
+        # the area (the behaviour before entry lines existed).
+        for col, typ in (("entry_line", "TEXT"), ("inside_sign", "INTEGER")):
+            try:
+                conn.execute(f"ALTER TABLE reid_camera_config ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError:
+                pass
 
 
 # --- Persons ----------------------------------------------------------------
@@ -330,6 +363,12 @@ def prune_stale_tracks(older_than_seconds: float) -> None:
 
 # --- Events / unique footfall -----------------------------------------------
 
+def has_events(person_id: int) -> bool:
+    """Whether this person has ever been counted (has any event)."""
+    with get_connection() as conn:
+        return conn.execute("SELECT 1 FROM reid_events WHERE person_id = ? LIMIT 1", (person_id,)).fetchone() is not None
+
+
 def log_event(camera_id: int, track_id: int, event_type: str, person_id: int | None = None, confidence: float | None = None, now: float | None = None) -> int:
     now = now if now is not None else time.time()
     with get_connection() as conn:
@@ -425,12 +464,20 @@ def reset_identities(delete_snapshot_files: bool = True) -> dict[str, int]:
             "SELECT ? || '-' || person_id, camera_id, ts, event_type FROM reid_events WHERE person_id IS NOT NULL",
             (str(int(time.time())),),
         )
+        clip_paths = [r[0] for r in conn.execute("SELECT clip_path FROM footfall_clips WHERE clip_path IS NOT NULL")]
+        removed["footfall_clips"] = conn.execute("SELECT COUNT(*) FROM footfall_clips").fetchone()[0]
+        conn.execute("DELETE FROM footfall_clips")   # person ids restart after a reset
         for table in ("reid_events", "reid_tracks", "reid_snapshots", "reid_embeddings", "reid_persons"):
             removed[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             conn.execute(f"DELETE FROM {table}")
         # Restart labelling at PERSON_001 rather than continuing the old run.
         conn.execute("DELETE FROM sqlite_sequence WHERE name LIKE 'reid_%'")
     removed["snapshot_files"] = files_removed
+    clips_root = (Path(config.DATA_DIR) / "footfall_clips").resolve()
+    for rel in clip_paths:
+        path = (Path(config.DATA_DIR) / rel).resolve()
+        if path.parent.parent == clips_root:   # never outside the clips folder
+            path.unlink(missing_ok=True)
     return removed
 
 
@@ -446,9 +493,13 @@ def count_unique_lifetime() -> int:
 
 
 def count_new_today(now: float | None = None) -> int:
+    """People counted today for the first time ever."""
     day_start = _day_start(now)
     with get_connection() as conn:
-        return conn.execute("SELECT COUNT(*) FROM reid_persons WHERE first_seen >= ?", (day_start,)).fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM (SELECT person_id, MIN(ts) AS first_ts FROM reid_events "
+            "WHERE person_id IS NOT NULL GROUP BY person_id) WHERE first_ts >= ?", (day_start,)
+        ).fetchone()[0]
 
 
 def count_returning_today(now: float | None = None) -> int:
@@ -457,8 +508,8 @@ def count_returning_today(now: float | None = None) -> int:
     day_start = _day_start(now)
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT COUNT(DISTINCT e.person_id) FROM reid_events e JOIN reid_persons p ON p.id = e.person_id "
-            "WHERE e.ts >= ? AND p.first_seen < ?",
+            "SELECT COUNT(DISTINCT e.person_id) FROM reid_events e WHERE e.ts >= ? AND e.person_id IN "
+            "(SELECT person_id FROM reid_events WHERE person_id IS NOT NULL AND ts < ?)",
             (day_start, day_start),
         ).fetchone()
     return row[0] or 0
@@ -491,11 +542,29 @@ def get_camera_config(camera_id: int) -> dict:
         return {
             "camera_id": camera_id, "enabled": False, "similarity_threshold": None,
             "quality_min_score": None, "mot_interval_seconds": None, "roi": None,
+            "entry_line": None, "inside_sign": 1,
         }
     d = dict(row)
     d["enabled"] = bool(d["enabled"])
     d["roi"] = json.loads(d["roi"]) if d["roi"] else None
+    d["entry_line"] = json.loads(d["entry_line"]) if d.get("entry_line") else None
+    d["inside_sign"] = -1 if (d.get("inside_sign") or 1) < 0 else 1
     return d
+
+
+def set_entry_line(camera_id: int, line: list[list[float]] | None, inside_sign: int = 1) -> None:
+    """The gate's entry line and inside side; None removes it. The other
+    settings (ROI, thresholds) are left as they are."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO reid_camera_config (camera_id, enabled, updated_at) VALUES (?, 1, ?) "
+            "ON CONFLICT(camera_id) DO NOTHING",
+            (camera_id, time.time()),
+        )
+        conn.execute(
+            "UPDATE reid_camera_config SET entry_line = ?, inside_sign = ?, updated_at = ? WHERE camera_id = ?",
+            (json.dumps(line) if line else None, -1 if inside_sign < 0 else 1, time.time(), camera_id),
+        )
 
 
 def list_camera_configs() -> list[dict]:
@@ -507,6 +576,8 @@ def list_camera_configs() -> list[dict]:
         d = dict(row)
         d["enabled"] = bool(d["enabled"])
         d["roi"] = json.loads(d["roi"]) if d["roi"] else None
+        d["entry_line"] = json.loads(d["entry_line"]) if d.get("entry_line") else None
+        d["inside_sign"] = -1 if (d.get("inside_sign") or 1) < 0 else 1
         out.append(d)
     return out
 

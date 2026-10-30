@@ -92,8 +92,22 @@ class _Identity:
 
         return analytics_settings.enabled("face_recognition") and P._get_classifier() is not None
 
-    def identify(self, frame: np.ndarray, bbox) -> tuple[str | None, float]:
+    def identify(self, frame: np.ndarray, bbox, camera_id: int | None = None) -> tuple[str | None, float]:
+        """Who crossed the gate. Uses the camera's face pipeline with the same
+        rules as everywhere else (classifier, then the enrolled-photo gallery,
+        each with its own threshold), so a person is named at the gate exactly
+        as on the other cameras; the classifier alone otherwise."""
+        from app import face_pipeline
         from app.face_pipeline import CameraFacePipeline as P
+
+        pipe = face_pipeline.get_existing_pipeline(camera_id) if camera_id is not None else None
+        if pipe is not None:
+            x1, y1, x2, y2 = (float(v) for v in bbox)
+            employee, confidence, _outcome = pipe._identify_head(frame, [x1, y1, x2, y1 + 0.45 * (y2 - y1)])  # noqa: SLF001
+            if employee:
+                # Already passed that rule's own threshold: a confident vote here.
+                return str(employee), max(float(confidence), staff_config.SETTINGS["recognition_confidence"])
+            return None, 0.0
 
         clf = P._get_classifier()
         if clf is None:
@@ -217,7 +231,7 @@ class StaffService:
     def _process(self, cam: _Camera, frame: np.ndarray, ts: float, people: list[dict]) -> None:
         try:
             people = [p for p in people if p["track_id"] is not None and p["confidence"] >= self.cfg["detection_confidence"]]
-            identify = (lambda b: self.identity.identify(frame, b)) if not self.anonymous_mode() else None
+            identify = (lambda b: self.identity.identify(frame, b, cam.camera_id)) if not self.anonymous_mode() else None
             cam.tracker.update(people, frame.shape, ts, identify, lambda b: self.identity.embed(frame, b))
             # Faces confirmed at the entrance teach the appearance hand-off
             # (appearance.py), so these people can be named on desk cameras

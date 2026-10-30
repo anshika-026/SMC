@@ -16,8 +16,15 @@ router = APIRouter(prefix="/api", tags=["insights"])
 
 
 @router.get("/dashboard/summary")
-def dashboard_summary(_: dict = Depends(auth.require_admin)):
-    return insights.dashboard_summary()
+def dashboard_summary(date: str | None = None, _: dict = Depends(auth.require_admin)):
+    """Camera health and attention list (live), plus the business overview
+    for `date` (YYYY-MM-DD, default today)."""
+    if date:
+        try:
+            datetime.date.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Dates must look like 2026-09-28")
+    return {**insights.dashboard_summary(), "business": insights.business_overview(date)}
 
 
 @router.get("/workforce/overview")

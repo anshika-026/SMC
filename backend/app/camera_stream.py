@@ -27,7 +27,7 @@ from multiprocessing import shared_memory
 import cv2
 import numpy as np
 
-from . import analytics_settings, camera_db, config, footfall, person_detection, resilience, rtsp_reader, stream_source, visitors  # noqa: F401 (footfall registers as a consumer on import)
+from . import analytics_settings, camera_db, clips, config, footfall, person_detection, resilience, rtsp_reader, stream_source, visitors  # noqa: F401 (footfall registers as a consumer on import)
 from .face_pipeline import discard_pipeline, get_pipeline
 from .staff import service as _staff_service  # noqa: F401 (registers with person_detection on import)
 
@@ -399,12 +399,13 @@ class CameraStream:
                 except Exception:
                     log.exception("camera %s: person detection dispatch failed", self.camera_id)
 
-                # Visitor Management's rolling clip buffer (a no-op unless this
-                # camera has a visitor area; the encode runs on its own worker).
+                # Rolling clip buffer for Visitor Management and Footfall
+                # (clips.py): a no-op unless one of them wants this camera; the
+                # encode runs on its own worker.
                 try:
-                    visitors.service.tap(self.camera_id, frame)
+                    clips.recorder.tap(self.camera_id, frame)
                 except Exception:
-                    log.exception("camera %s: visitor clip buffer failed", self.camera_id)
+                    log.exception("camera %s: clip buffer failed", self.camera_id)
 
                 # JPEG-encode once per distinct width actually being watched.
                 # Full-HD JPEGs at 8 fps are ~17 Mbps per camera to each

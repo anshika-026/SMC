@@ -1,6 +1,7 @@
 import { Outlet, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
+import GlobalBackground from "../components/GlobalBackground";
 
 const TITLES = {
   "/dashboard": "Dashboard",
@@ -25,7 +26,8 @@ export default function AppShell() {
   const title = TITLES[pathname];
 
   return (
-    <div className="flex min-h-screen bg-[#f5f6fa]">
+    <div className="isolate flex min-h-screen bg-[#f5f6fa]">
+      <GlobalBackground />
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
         <Topbar title={title} />

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { AreaChart, Area, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
-import { DoorOpen, Pencil, Plus, Trash2 } from "lucide-react";
+import { DoorOpen, Download, Film, Footprints, Pencil, Plus, Trash2 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import StatCard from "../components/StatCard";
+import KpiPanel from "../components/KpiPanel";
 import DataTable from "../components/DataTable";
 import Modal from "../components/Modal";
 import FootfallAddCamera from "../components/FootfallAddCamera";
@@ -76,14 +76,35 @@ export default function Footfall() {
     }
   }
 
+  // A counted person's evidence: their ~10 s clip. Rows recorded before clips
+  // existed fall back to the picture.
   async function openPicture(row) {
+    const base = { row, person: row.name || row.person, url: null, video: false, error: "" };
+    if (row.clip_id) {
+      if (row.clip_status === "expired") {
+        setPicture({ ...base, error: "This clip was deleted automatically (clips are kept for 24 hours)." });
+        return;
+      }
+      if (row.clip_status === "failed") {
+        setPicture({ ...base, error: row.clip_error || "No clip was recorded for this person." });
+        return;
+      }
+      setPicture({ ...base, video: true });
+      try {
+        const url = await api.fetchFootfallClipObjectUrl(row.clip_id);
+        setPicture({ ...base, video: true, url });
+      } catch (e) {
+        setPicture({ ...base, video: true, error: e.status === 409 ? "The clip is still being recorded - open it again in a few seconds." : e.message });
+      }
+      return;
+    }
     if (!row.snapshot_id) return;
-    setPicture({ person: row.person, url: null, error: "" });
+    setPicture(base);
     try {
       const url = await api.fetchFootfallSnapshotObjectUrl(row.snapshot_id);
-      setPicture({ person: row.person, url, error: "" });
+      setPicture({ ...base, url });
     } catch {
-      setPicture({ person: row.person, url: null, error: "This picture is no longer available (pictures are deleted after 24 hours)." });
+      setPicture({ ...base, error: "This picture is no longer available (pictures are deleted after 24 hours)." });
     }
   }
 
@@ -111,22 +132,25 @@ export default function Footfall() {
         </p>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard
-          label="Unique Footfall Today"
-          value={data.unique_today}
-          sub={`each person once, across ${data.gates.length} gate${data.gates.length === 1 ? "" : "s"}`}
-          subTone="neutral"
-        />
-        <StatCard label="Average per Gate" value={data.avg_per_gate} sub="unique people seen at each gate" subTone="neutral" />
-        <StatCard label="Busiest Hour" value={hourLabel(data.busiest_hour)} sub="by first arrival" subTone="neutral" />
-        <StatCard
-          label="Returning Today"
-          value={data.returning_today}
-          sub={`${data.new_today} first-time visitors`}
-          subTone="neutral"
-        />
-      </div>
+      <KpiPanel
+        icon={Footprints}
+        title="Footfall"
+        items={[
+          {
+            label: "Verified entries today",
+            value: String(data.unique_today),
+            sub: `each person once, across ${data.gates.length} gate${data.gates.length === 1 ? "" : "s"}`,
+          },
+          {
+            label: "Peak entry hour",
+            value: data.busiest_hour == null ? "—" : `${hourLabel(data.busiest_hour)}–${hourLabel((data.busiest_hour + 1) % 24)}`,
+            sub: "most first arrivals",
+          },
+          { label: "Employee entries", value: String(data.employee_entries ?? 0), sub: "recognised by face" },
+          { label: "Visitor entries", value: String(data.visitor_entries ?? data.unique_today), sub: `${data.returning_today} returning · ${data.new_today} first-time` },
+        ]}
+        note={data.gates.some((g) => !g.entry_line) ? "Gates without an entry line count everyone seen in their area - draw the line to count only inward entries." : undefined}
+      />
 
       <div className="grid lg:grid-cols-2 gap-5">
         <div className="card p-5">
@@ -202,9 +226,14 @@ export default function Footfall() {
                     <DoorOpen size={14} className="text-slate-400" />
                     <span className="text-ink-900 flex-1">{g.name}</span>
                     {!g.counting && <span className="badge badge-warning">not counting</span>}
+                    {!g.entry_line && (
+                      <button type="button" onClick={() => setEditCameraId(g.camera_id)} className="badge badge-warning" title="Without an entry line everyone in the area is counted, including people outside the gate">
+                        draw entry line
+                      </button>
+                    )}
                     <button
                       type="button"
-                      title="Edit counting area"
+                      title="Edit gate (entry line and area)"
                       onClick={() => setEditCameraId(g.camera_id)}
                       className="text-slate-400 hover:text-ink-900"
                     >
@@ -230,17 +259,41 @@ export default function Footfall() {
 
       <DataTable
         columns={[
-          { key: "person", label: "Person" },
+          {
+            key: "name",
+            label: "Person",
+            render: (r) => (
+              <span>
+                <span className={r.employee_id ? "font-medium text-ink-900" : "text-slate-600"}>{r.name || "Person"}</span>
+                <span className="block text-[11px] text-slate-400">{r.person}</span>
+              </span>
+            ),
+          },
           { key: "first_seen", label: "First seen", render: (r) => timeLabel(r.first_seen) },
           { key: "last_seen", label: "Last seen", render: (r) => timeLabel(r.last_seen) },
           { key: "gates", label: "Gates", render: (r) => r.gates.join(", ") },
+          {
+            key: "clip",
+            label: "Clip",
+            render: (r) =>
+              !r.clip_id ? (
+                <span className="text-xs text-slate-400">{r.snapshot_id ? "Picture" : "-"}</span>
+              ) : (
+                <span className={`badge ${r.clip_status === "ready" ? "badge-success" : r.clip_status === "pending" ? "badge-warning" : "badge-neutral"}`}>
+                  <Film size={11} />
+                  {{ ready: "Play", pending: "Recording…", failed: "No clip", expired: "Deleted" }[r.clip_status] || r.clip_status}
+                </span>
+              ),
+          },
         ]}
         rows={data.visitors}
         emptyLabel="Nobody counted yet today"
         onRowClick={openPicture}
       />
       <p className="text-xs text-slate-400">
-        Click a person to see their picture. Pictures are deleted automatically 24 hours after they were taken; the person stays in the count.
+        Registered employees are named when face recognition confirms them; everyone else is shown as "Person". Click a person to
+        play the ~10 second clip of when they were first counted today. Clips are deleted automatically after 24 hours; the person
+        stays in the count.
       </p>
       {actionError && <p className="text-sm text-danger-500">{actionError}</p>}
 
@@ -269,13 +322,37 @@ export default function Footfall() {
         </div>
       </Modal>
 
-      <Modal open={!!picture} onClose={() => setPicture(null)} title={picture ? `${picture.person} — picture` : ""} width="max-w-lg">
-        {picture?.url ? (
+      <Modal
+        open={!!picture}
+        onClose={() => setPicture(null)}
+        title={picture ? `${picture.person} — ${picture.video || picture.row?.clip_id ? "clip" : "picture"}` : ""}
+        width={picture?.video ? "max-w-2xl" : "max-w-lg"}
+      >
+        {picture?.row?.clip_id && (
+          <p className="text-xs text-slate-500 mb-2">
+            {picture.row.clip_camera} · counted at {picture.row.clip_at ? new Date(picture.row.clip_at * 1000).toLocaleString() : "-"}
+            {picture.row.employee_id ? ` · employee ${picture.row.employee_id}` : ""}
+          </p>
+        )}
+        {picture?.url && picture.video ? (
+          <>
+            <video src={picture.url} controls autoPlay playsInline className="w-full max-h-[70vh] rounded-lg bg-black" />
+            <a
+              href={picture.url}
+              download={`footfall-${(picture.person || "person").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${picture.row.clip_id}.mp4`}
+              className="btn-secondary text-sm inline-flex items-center gap-1.5 mt-3"
+            >
+              <Download size={14} /> Download clip
+            </a>
+          </>
+        ) : picture?.url ? (
           <img src={picture.url} alt={`Picture of ${picture.person}`} className="w-full max-h-[70vh] object-contain rounded-lg bg-slate-100" />
         ) : (
-          <p className="text-sm text-slate-500">{picture?.error || "Loading picture…"}</p>
+          <p className="text-sm text-slate-500">{picture?.error || (picture?.video ? "Loading clip…" : "Loading picture…")}</p>
         )}
-        <p className="text-xs text-slate-400 mt-3">This picture is deleted automatically 24 hours after it was taken.</p>
+        <p className="text-xs text-slate-400 mt-3">
+          {picture?.video ? "About 5 seconds before and 5 seconds after they were counted. " : ""}Deleted automatically after 24 hours.
+        </p>
       </Modal>
     </div>
   );

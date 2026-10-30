@@ -11,7 +11,7 @@ import * as api from "../api/client";
 const LINE = "#facc15";
 const ROI = "#22d3ee";
 
-function officeArrow(line, insideSign) {
+export function officeArrow(line, insideSign) {
   // Midpoint of the line and a short arrow pointing to the office side.
   const [[x1, y1], [x2, y2]] = line;
   const mx = (x1 + x2) / 2;

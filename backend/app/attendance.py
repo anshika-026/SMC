@@ -36,6 +36,13 @@ ATTENDANCE_ON_SITE_MINUTES = float(os.environ.get("ATTENDANCE_ON_SITE_MINUTES", 
 # write at most one update per this many seconds (the first of the day is
 # always written immediately).
 WRITE_EVERY_SECONDS = 20
+# End of the working day (HH:MM): last seen more than ATTENDANCE_EARLY_GRACE_MINUTES
+# before it = early departure; more than ATTENDANCE_OVERTIME_MINUTES after = overtime.
+ATTENDANCE_SHIFT_END = os.environ.get("ATTENDANCE_SHIFT_END", "18:00")
+ATTENDANCE_EARLY_GRACE_MINUTES = float(os.environ.get("ATTENDANCE_EARLY_GRACE_MINUTES", "15"))
+ATTENDANCE_OVERTIME_MINUTES = float(os.environ.get("ATTENDANCE_OVERTIME_MINUTES", "30"))
+# KPI: employees late this many times or more in the last 30 days.
+LATE_REPEAT_COUNT = int(os.environ.get("ATTENDANCE_LATE_REPEAT_COUNT", "3"))
 # A person seen again on the same camera within this gap is the same
 # recognition event (face_recognition_events).
 RECOGNITION_EVENT_GAP_SECONDS = float(os.environ.get("RECOGNITION_EVENT_GAP_SECONDS", "600"))
@@ -201,6 +208,26 @@ def _stay(first: float | None, last: float | None) -> str:
     return f"{mins // 60}h {mins % 60:02d}m"
 
 
+def _shift_end(day: str) -> float:
+    h, m = (int(x) for x in ATTENDANCE_SHIFT_END.split(":"))
+    return datetime.datetime.strptime(day, "%Y-%m-%d").replace(hour=h, minute=m).timestamp()
+
+
+def _departure(s: dict | None, day: str, now: float) -> tuple[str, int]:
+    """("Early departure" | "Overtime" | "Normal" | "-", overtime minutes).
+    Early departure is only decided once the shift has ended (before that,
+    someone not seen recently may simply be elsewhere in the building)."""
+    if not s:
+        return "-", 0
+    end = _shift_end(day)
+    over = (s["last_seen"] - end) / 60
+    if over > ATTENDANCE_OVERTIME_MINUTES:
+        return "Overtime", int(over)
+    if now >= end and s["last_seen"] < end - ATTENDANCE_EARLY_GRACE_MINUTES * 60:
+        return "Early departure", 0
+    return ("Normal" if now >= end else "-"), 0
+
+
 def _late_cutoff(day: str) -> float:
     h, m = (int(x) for x in ATTENDANCE_LATE_AFTER.split(":"))
     d = datetime.datetime.strptime(day, "%Y-%m-%d")
@@ -230,7 +257,10 @@ def day_report(day: str, now: float | None = None) -> dict:
     for emp_id, emp in sorted(employee_directory.EMPLOYEES.items()):
         s = seen.get(emp_id)
         status = _status(s, emp_id in on_leave, day, now)
+        departure, overtime = _departure(s, day, now)
         rows.append({
+            "departure": departure,
+            "overtime_minutes": overtime,
             "employee_id": emp_id,
             "name": emp["name"],
             "company": emp["company"] or "No company",
@@ -249,6 +279,17 @@ def day_report(day: str, now: float | None = None) -> dict:
 
     total = len(rows)
     present = sum(r["status"] in ("Present", "On site") for r in rows)
+
+    # KPI cards: employees late LATE_REPEAT_COUNT+ times in the 30 days up to
+    # this day, and employees present with a single sighting (no time-out yet).
+    window_start = (datetime.datetime.strptime(day, "%Y-%m-%d") - datetime.timedelta(days=29)).strftime("%Y-%m-%d")
+    with _conn() as conn:
+        late_days: dict[str, int] = {}
+        for r in conn.execute("SELECT employee_id, day, first_seen FROM attendance_days WHERE day BETWEEN ? AND ?", (window_start, day)):
+            if r["employee_id"] in employee_directory.EMPLOYEES and r["first_seen"] > _late_cutoff(r["day"]):
+                late_days[r["employee_id"]] = late_days.get(r["employee_id"], 0) + 1
+    single = sum(1 for emp_id, s in seen.items()
+                 if emp_id in employee_directory.EMPLOYEES and s["last_seen"] - s["first_seen"] < 60)
     return {
         "date": day,
         "late_after": ATTENDANCE_LATE_AFTER,
@@ -260,7 +301,16 @@ def day_report(day: str, now: float | None = None) -> dict:
             "on_leave": sum(r["status"] == "On Leave" for r in rows),
             "late": sum(r["arrival"] == "Late arrival" for r in rows),
             "attendance_pct": round(present / total * 100, 1) if total else 0,
+            "late_repeat": sum(1 for n in late_days.values() if n >= LATE_REPEAT_COUNT),
+            "late_repeat_threshold": LATE_REPEAT_COUNT,
+            "seen_once": single,
+            "early_departures": sum(r["departure"] == "Early departure" for r in rows),
+            "overtime": sum(r["departure"] == "Overtime" for r in rows),
+            "overtime_minutes": sum(r["overtime_minutes"] for r in rows),
+            "shift_end": ATTENDANCE_SHIFT_END,
         },
+        # Employees late LATE_REPEAT_COUNT+ times in 30 days (names for the exceptions list).
+        "late_repeat_ids": sorted(e for e, n in late_days.items() if n >= LATE_REPEAT_COUNT),
     }
 
 
