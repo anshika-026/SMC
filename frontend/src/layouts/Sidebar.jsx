@@ -9,9 +9,6 @@ import {
   ScanFace,
   Contact,
   TrendingUp,
-  Footprints,
-  FlaskConical,
-  Users,
   Cctv,
   MapPinned,
   IdCard,
@@ -55,9 +52,6 @@ const NAV_SECTIONS = [
       // Attendance is built from face recognition sightings (backend/app/attendance.py).
       { to: "/attendance", label: "Attendance", icon: CalendarCheck, requiresFeature: "attendance", analytics: "face_recognition" },
       { to: "/visitors", label: "Visitor Management", icon: Contact, requiresFeature: "footfall_analytics", analytics: "visitors" },
-      { to: "/staff", label: "Staff Counting", icon: Users, requiresFeature: "attendance", analytics: "staff_count" },
-      { to: "/footfall", label: "Footfall", icon: Footprints, requiresFeature: "footfall_analytics", analytics: "footfall" },
-      { to: "/footfall-uat", label: "Footfall UAT", icon: FlaskConical, requiresFeature: "footfall_analytics", adminOnly: true, analytics: "footfall" },
     ],
   },
   {

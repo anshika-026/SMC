@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarClock, Search, X } from "lucide-react";
+import { CalendarClock, ChevronLeft, ChevronRight, ListFilter, MapPin, ScanSearch, Search, X } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import SidePanel from "../components/SidePanel";
@@ -9,11 +9,13 @@ import HolidaysPanel from "../components/workforce/HolidaysPanel";
 import PolicyPanel from "../components/workforce/PolicyPanel";
 import { DayBadge, clock, dur, shiftIso, todayIso } from "../components/workforce/shared";
 import InsightCard from "../components/workforce/InsightCard";
+import PresenceInvestigation, { CorrectionForm, CorrectionHistory } from "../components/workforce/PresenceInvestigation";
 import { hr } from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
 
 // Attendance dashboard: four consolidated KPI cards over the Daily Attendance
-// Log. All figures come from the backend's classification of each employee's
+// Log. Each card pages through its metrics (arrows / swipe); clicking a card
+// opens the detailed, employee-wise view of the metric it is showing. All figures come from the backend's classification of each employee's
 // day (backend/app/workforce.py overview()): gate crossings, face sightings,
 // holidays, weekly offs, approved leave/WFH and the stored policy. Requests,
 // leave balances, holidays and the policy open from the header.
@@ -86,6 +88,183 @@ function workedSeconds(r) {
   return 0;
 }
 
+// The detailed view behind a KPI card: every employee in that KPI for a day,
+// with times, location, working hours, time outside and the reasons, plus
+// search, a status filter and day-by-day navigation. Same classification and
+// rules (QUICK) as the cards and the daily log.
+function KpiDetail({ open, kpi, cardTitle, initialDate, onClose, onPickEmployee, onShowInLog }) {
+  const [day, setDay] = useState(initialDate);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setDay(initialDate);
+      setQ("");
+      setStatus("");
+    }
+  }, [open, kpi, initialDate]);
+
+  useEffect(() => {
+    if (!open) return;
+    setData(null);
+    hr.overview({ date: day })
+      .then((d) => {
+        setData(d);
+        setError("");
+      })
+      .catch((e) => setError(e.message));
+  }, [open, day]);
+
+  if (!open || !QUICK[kpi]) return null;
+  const rule = QUICK[kpi];
+  const all = (data?.rows || []).filter(rule.test);
+  const needle = q.trim().toLowerCase();
+  const rows = all.filter(
+    (r) => (!status || r.status === status) && (!needle || r.name.toLowerCase().includes(needle) || String(r.employee_id).toLowerCase().includes(needle))
+  );
+  const statuses = [...new Set(all.map((r) => r.status))];
+  const today = todayIso();
+  const live = ["inside", "outside"].includes(kpi);
+  const monthly = ["late_limit", "half_day_limit", "compliance"].includes(kpi);
+  const total = data?.rows?.length || 0;
+  const niceDay = new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+
+  return (
+    <Modal open onClose={onClose} width="max-w-6xl" title={`${cardTitle} · ${rule.label}`}>
+      <div className="space-y-4 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1">
+            <button type="button" aria-label="Previous day" className="btn-secondary !px-2 !py-1.5" onClick={() => setDay(shiftIso(day, -1))}>
+              <ChevronLeft size={15} />
+            </button>
+            <input type="date" value={day} max={today} onChange={(e) => e.target.value && setDay(e.target.value)} className="input-field !w-auto !py-1.5 text-sm" />
+            <button type="button" aria-label="Next day" className="btn-secondary !px-2 !py-1.5" disabled={day >= today} onClick={() => setDay(shiftIso(day, 1))}>
+              <ChevronRight size={15} />
+            </button>
+            {day !== today && (
+              <button type="button" className="text-xs text-brand-600 ml-1" onClick={() => setDay(today)}>
+                Today
+              </button>
+            )}
+          </div>
+          <label className="relative ml-auto">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name or ID" className="input-field !w-52 !py-1.5 !pl-8 text-sm" />
+          </label>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-field !w-auto !py-1.5 text-sm">
+            <option value="">All statuses</option>
+            {statuses.map((x) => (
+              <option key={x}>{x}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <p className="text-2xl font-light text-ink-900 tabular-nums">
+            {data ? all.length : "—"}
+            <span className="text-sm text-slate-500"> of {total} employees</span>
+          </p>
+          <p className="text-xs text-slate-500">{niceDay}</p>
+          {rows.length !== all.length && <p className="text-xs text-slate-500">{rows.length} shown with your filters</p>}
+          {live && day !== today && <p className="text-xs text-amber-600">Live location is only known for today.</p>}
+          {monthly && <p className="text-xs text-slate-500">Counts are for the month of the chosen day.</p>}
+        </div>
+
+        {error && <p className="text-sm text-danger-500">{error}</p>}
+        <div className="overflow-x-auto rounded-xl ring-1 ring-[#eef0f5]">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Employee</th>
+                <th>Status</th>
+                <th>Entry</th>
+                <th>Exit</th>
+                <th>Working hours</th>
+                <th>Time outside</th>
+                <th>Location</th>
+                <th>Reasons & exceptions</th>
+                {monthly && <th>This month</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {!data && !error && (
+                <tr>
+                  <td colSpan={9} className="text-center text-slate-400 py-10">Loading…</td>
+                </tr>
+              )}
+              {data && rows.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="text-center text-slate-400 py-10">
+                    {all.length ? "No employees match your search." : `Nobody in “${rule.label}” on this day.`}
+                  </td>
+                </tr>
+              )}
+              {rows.map((r) => {
+                const worked = workedSeconds(r);
+                const reasons = rowExceptions(r);
+                if (r.leave_type) reasons.unshift(`Leave: ${r.leave_type}`);
+                if (r.holiday) reasons.unshift(r.holiday);
+                return (
+                  <tr key={r.employee_id} className="cursor-pointer" onClick={() => onPickEmployee(r, day)}>
+                    <td>
+                      <span className="font-medium text-ink-900">{r.name}</span>
+                      <span className="block text-[11px] text-slate-400">ID {r.employee_id}</span>
+                    </td>
+                    <td>
+                      <DayBadge status={r.status} />
+                    </td>
+                    <td className="tabular-nums">{clock(r.first_in)}</td>
+                    <td className="tabular-nums">{r.inside_now ? "—" : clock(r.last_out)}</td>
+                    <td className="tabular-nums">
+                      {worked ? dur(worked) : "—"}
+                      {worked > 0 && r.source === "face" && <span className="text-[11px] text-slate-400"> (approx.)</span>}
+                    </td>
+                    <td className="tabular-nums">
+                      {r.outside_seconds ? dur(r.outside_seconds) : "—"}
+                      {r.outside_periods ? <span className="text-[11px] text-slate-400"> ({r.outside_periods}×)</span> : null}
+                    </td>
+                    <td>
+                      <LocationCell r={r} />
+                    </td>
+                    <td>
+                      {reasons.length === 0 ? (
+                        <span className="text-slate-300">—</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {reasons.map((e) => (
+                            <span key={e} className="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 whitespace-nowrap">
+                              {e}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    {monthly && (
+                      <td className="text-xs text-slate-600 whitespace-nowrap">
+                        {r.month.late} late · {r.month.half_day} half · {r.month.absent} absent
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] text-slate-400">Click an employee for their entry/exit timeline and last 14 days.</p>
+          <button type="button" className="btn-secondary text-xs inline-flex items-center gap-1.5" onClick={() => onShowInLog(kpi, day)}>
+            <ListFilter size={13} /> Show in the daily attendance log
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export default function Attendance() {
   const [date, setDate] = useState(() => {
     // Opened from the Dashboard with ?date=YYYY-MM-DD: show that day.
@@ -99,6 +278,10 @@ export default function Attendance() {
   const [error, setError] = useState("");
   const [manage, setManage] = useState(null);   // Requests | Leave balances | Holidays | Policy
   const [selected, setSelected] = useState(null);
+  const [detail, setDetail] = useState(null);       // {kpi, title}: the KPI detail view open
+  const [presence, setPresence] = useState(null);   // the selected employee's camera evidence
+  const [investigating, setInvestigating] = useState(false);
+  const [correctingEmp, setCorrectingEmp] = useState(false);
   const [history, setHistory] = useState(null);
   const [period, setPeriod] = useState({ workforce: "week", exceptions: "week", compliance: "week", tracking: "week" });
   const [rangeRows, setRangeRows] = useState([]);   // last 30 days, classified (charts)
@@ -126,11 +309,39 @@ export default function Attendance() {
       .catch(() => setRangeRows([]));
   }, [date]);
 
+  // The selected employee's camera evidence (presence.py), for the panel.
+  const selId = selected?.employee_id;
+  const selDay = selected ? selected._day || date : null;
+  const loadPresence = useCallback(() => {
+    if (!selId) return;
+    hr.presence(selId, selDay)
+      .then(setPresence)
+      .catch(() => setPresence(null));
+  }, [selId, selDay]);
+  // A different employee (or day): fresh evidence, investigation closed.
+  useEffect(() => {
+    setPresence(null);
+    setInvestigating(false);
+    loadPresence();
+  }, [loadPresence]);
+  // After a correction: the log, the panel's record and its history.
+  const afterCorrection = () => {
+    load();
+    loadPresence();
+    if (selected) {
+      const day = selected._day || date;
+      hr.range({ from: day, to: day, employeeId: selected.employee_id })
+        .then((d) => d.rows[0] && setSelected((s) => (s ? { ...s, ...d.rows[0] } : s)))
+        .catch(() => {});
+    }
+  };
+
   // The selected employee's last 14 days, from the same classification.
   useEffect(() => {
     if (!selected) return;
     setHistory(null);
-    hr.range({ from: shiftIso(date, -13), to: date, employeeId: selected.employee_id })
+    const day = selected._day || date;
+    hr.range({ from: shiftIso(day, -13), to: day, employeeId: selected.employee_id })
       .then((d) => setHistory([...d.rows].reverse()))
       .catch(() => setHistory([]));
   }, [selected, date]);
@@ -159,10 +370,19 @@ export default function Attendance() {
 
   const toggleQuick = (key) => setQuick((k) => (k === key ? "" : key));
   // A card's arrow: show exactly those employees in the log.
-  const openFilter = (key) => {
+  // Show exactly those employees in the daily log.
+  const filterLog = (key) => {
     setQuick(key);
     document.getElementById("attendance-log")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
+  // A KPI card click: the detailed view of the metric the card is showing.
+  const CARD_OF = {
+    present: "Workforce Status", inside: "Workforce Status", outside: "Workforce Status", wfh: "Workforce Status", leave: "Workforce Status",
+    exceptions: "Attendance Exceptions", late: "Attendance Exceptions", absent: "Attendance Exceptions", half_day: "Attendance Exceptions",
+    compliance: "Policy Compliance", late_limit: "Policy Compliance", half_day_limit: "Policy Compliance", overtime: "Policy Compliance",
+    long_outside: "Policy Compliance", missing: "Tracking & Requests",
+  };
+  const openDetail = (kpi) => setDetail({ kpi, title: CARD_OF[kpi] });
   // Daily counts for the last 7 or 30 days ending at the chosen date.
   const inDept = useMemo(() => new Set(rows.map((r) => r.employee_id)), [rows]);
   const series = (test, p) => {
@@ -211,7 +431,7 @@ export default function Attendance() {
               series: series((r) => WORKED.includes(r.status), period.workforce),
               better: "up",
               insight: data ? `${presentToday} of ${count("total")} employees came in${pctText(presentToday, count("total"))}.` : "Loading…",
-              onOpen: () => openFilter("present"),
+              onOpen: () => openDetail("present"),
             },
             {
               key: "inside",
@@ -220,7 +440,7 @@ export default function Attendance() {
               people: people((r) => r.inside_now),
               total: count("total"),
               insight: `${count("inside")} employee${count("inside") === 1 ? " is" : "s are"} inside the premises right now.`,
-              onOpen: () => openFilter("inside"),
+              onOpen: () => openDetail("inside"),
             },
             {
               key: "outside",
@@ -231,7 +451,7 @@ export default function Attendance() {
               insight: count("outside")
                 ? `${outsideConfirmed} left through the gate${count("outside") - outsideConfirmed ? `, ${count("outside") - outsideConfirmed} likely outside (last seen at the gate) - verify` : ""}.`
                 : "Nobody who came in is outside right now.",
-              onOpen: () => openFilter("outside"),
+              onOpen: () => openDetail("outside"),
             },
             {
               key: "wfh",
@@ -240,7 +460,7 @@ export default function Attendance() {
               people: people((r) => r.status === "WFH"),
               series: series((r) => r.status === "WFH", period.workforce),
               insight: `${count("wfh")} on approved work from home today.`,
-              onOpen: () => openFilter("wfh"),
+              onOpen: () => openDetail("wfh"),
             },
             {
               key: "leave",
@@ -249,7 +469,7 @@ export default function Attendance() {
               people: people((r) => r.status === "On leave" || !!r.half_day_leave),
               series: series((r) => r.status === "On leave" || !!r.half_day_leave, period.workforce),
               insight: `${count("leave")} on approved leave today (full or half day).`,
-              onOpen: () => openFilter("leave"),
+              onOpen: () => openDetail("leave"),
             },
           ]}
         />
@@ -267,7 +487,7 @@ export default function Attendance() {
               curve: "basis",
               better: "down",
               insight: data ? `${count("late")} late, ${count("absent")} absent and ${count("half_day")} on a half day.` : "Loading…",
-              onOpen: () => openFilter("exceptions"),
+              onOpen: () => openDetail("exceptions"),
             },
             {
               key: "late",
@@ -277,7 +497,7 @@ export default function Attendance() {
               curve: "basis",
               better: "down",
               insight: `${count("late")} arrived after the ${data?.policy.grace_minutes ?? 0}-minute grace period.`,
-              onOpen: () => openFilter("late"),
+              onOpen: () => openDetail("late"),
             },
             {
               key: "absent",
@@ -287,7 +507,7 @@ export default function Attendance() {
               curve: "basis",
               better: "down",
               insight: `${count("absent")} not seen and not on approved leave or WFH.`,
-              onOpen: () => openFilter("absent"),
+              onOpen: () => openDetail("absent"),
             },
             {
               key: "half_day",
@@ -297,7 +517,7 @@ export default function Attendance() {
               curve: "basis",
               better: "down",
               insight: `${count("half_day")} came in after ${data?.policy.half_day_after ?? "the cut-off"} or took half-day leave.`,
-              onOpen: () => openFilter("half_day"),
+              onOpen: () => openDetail("half_day"),
             },
           ]}
         />
@@ -313,7 +533,7 @@ export default function Attendance() {
               value: compliance,
               total: count("total"),
               insight: `${compliance} of ${count("total")} employees broke a time or attendance rule this month.`,
-              onOpen: () => openFilter("compliance"),
+              onOpen: () => openDetail("compliance"),
             },
             {
               key: "late_limit",
@@ -321,7 +541,7 @@ export default function Attendance() {
               value: count("late_limit"),
               total: count("total"),
               insight: `Late more than ${data?.policy.late_allowance_per_month ?? 0} times this month.`,
-              onOpen: () => openFilter("late_limit"),
+              onOpen: () => openDetail("late_limit"),
             },
             {
               key: "half_day_limit",
@@ -329,7 +549,7 @@ export default function Attendance() {
               value: count("half_day_limit"),
               total: count("total"),
               insight: `More than ${data?.policy.half_day_allowance_per_month ?? 0} half days this month.`,
-              onOpen: () => openFilter("half_day_limit"),
+              onOpen: () => openDetail("half_day_limit"),
             },
             {
               key: "overtime",
@@ -337,7 +557,7 @@ export default function Attendance() {
               value: count("overtime"),
               series: series((r) => r.overtime_minutes > 0, period.compliance),
               insight: `${count("overtime")} stayed past ${data?.policy.shift_end ?? "the shift end"} (+${data?.policy.overtime_after_minutes ?? 0} min).`,
-              onOpen: () => openFilter("overtime"),
+              onOpen: () => openDetail("overtime"),
             },
             {
               key: "long_outside",
@@ -346,7 +566,7 @@ export default function Attendance() {
               series: series((r) => r.long_outside, period.compliance),
               better: "down",
               insight: `Outside for more than ${data?.policy.long_outside_minutes ?? 0} minutes at a time.`,
-              onOpen: () => openFilter("long_outside"),
+              onOpen: () => openDetail("long_outside"),
             },
           ]}
         />
@@ -363,7 +583,7 @@ export default function Attendance() {
               series: series((r) => r.missing_entry || r.missing_exit, period.tracking),
               better: "down",
               insight: `${count("missing")} record${count("missing") === 1 ? "" : "s"} to check: seen by face but not at the gate, or exit not confirmed.`,
-              onOpen: () => openFilter("missing"),
+              onOpen: () => openDetail("missing"),
             },
             {
               key: "pending",
@@ -476,6 +696,7 @@ export default function Attendance() {
                     <td>
                       <DayBadge status={r.status} />
                       {r.holiday && <span className="block text-[11px] text-slate-400 mt-0.5">{r.holiday}</span>}
+                      {r.corrected && <span className="block text-[11px] text-brand-600 mt-0.5">{r.presence_verified ? "presence verified" : "corrected"}</span>}
                     </td>
                     <td>
                       {ex.length === 0 ? (
@@ -505,16 +726,91 @@ export default function Attendance() {
         )}
       </div>
 
-      <SidePanel open={!!selected} onClose={() => setSelected(null)} title={selected ? `${selected.name} · ${date}` : ""}>
+      <KpiDetail
+        open={!!detail}
+        kpi={detail?.kpi}
+        cardTitle={detail?.title}
+        initialDate={date}
+        onClose={() => setDetail(null)}
+        onPickEmployee={(r, day) => setSelected({ ...r, _day: day === date ? undefined : day })}
+        onShowInLog={(kpi, day) => {
+          setDetail(null);
+          if (day !== date) setDate(day);
+          filterLog(kpi);
+        }}
+      />
+
+      <SidePanel open={!!selected} onClose={() => setSelected(null)} title={selected ? `${selected.name} · ${selected._day || date}` : ""}>
         {selected && (
           <div className="space-y-5 text-sm">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <DayBadge status={selected.status} />
               <span className="text-slate-500">
                 ID {selected.employee_id}
+                {selected.department ? ` · ${selected.department}` : ""}
                 {selected.leave_type ? ` · ${selected.leave_type}` : ""}
               </span>
+              {selected.corrected && <span className="badge badge-neutral">Corrected</span>}
             </div>
+
+            <dl className="grid grid-cols-2 gap-y-1.5">
+              <dt className="text-slate-500">Entry</dt>
+              <dd className="tabular-nums">{clock(selected.first_in)}</dd>
+              <dt className="text-slate-500">Exit</dt>
+              <dd className="tabular-nums">{selected.inside_now ? "— (inside)" : clock(selected.last_out)}</dd>
+              <dt className="text-slate-500">Last detection</dt>
+              <dd>
+                {!presence ? (
+                  <span className="text-slate-400">Checking…</span>
+                ) : presence.last_detection ? (
+                  <>
+                    {clock(presence.last_detection.at)}
+                    <span className="block text-[11px] text-slate-500">
+                      {presence.last_detection.camera} · {presence.last_detection.live ? "live now" : "historical"}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-slate-400">No camera has recognised them</span>
+                )}
+              </dd>
+              <dt className="text-slate-500">Last location</dt>
+              <dd className="text-xs">{selected.location_detail || "Not known"}</dd>
+            </dl>
+
+            {presence && (
+              <div className={`rounded-xl px-3 py-2 text-xs ${presence.verdict.state === "verified_live" ? "bg-emerald-50 text-emerald-800" : presence.verdict.state === "verified_recent" ? "bg-sky-50 text-sky-800" : "bg-slate-50 text-slate-600"}`}>
+                <p className="font-semibold">{presence.verdict.label}</p>
+                <p>{presence.verdict.detail}</p>
+                {presence.verdict.lead && <p className="mt-0.5">{presence.verdict.lead}</p>}
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setInvestigating(true)} className="btn-primary text-sm inline-flex items-center gap-1.5 flex-1 justify-center">
+                <ScanSearch size={15} /> Verify Presence on Camera
+              </button>
+              <button type="button" onClick={() => setCorrectingEmp(true)} className="btn-secondary text-sm">
+                Correct attendance
+              </button>
+            </div>
+
+            {presence && presence.evidence.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1">
+                  <MapPin size={12} /> Recent camera activity
+                </p>
+                <ul className="space-y-1">
+                  {presence.evidence.slice(0, 5).map((e, i) => (
+                    <li key={i} className="flex justify-between gap-3 text-xs">
+                      <span className="text-slate-600 truncate">
+                        {e.camera} · {e.live ? (e.verified ? "recognised now" : "appearance match now (not verified)") : e.kind === "gate" ? e.detail.toLowerCase() : "recognised by face"}
+                      </span>
+                      <span className="text-slate-400 tabular-nums shrink-0">{e.live ? "now" : clock(e.at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div>
               <p className="text-xs font-semibold text-slate-500 mb-2">Entry / exit timeline</p>
               {selected.sessions.length === 0 ? (
@@ -569,9 +865,35 @@ export default function Attendance() {
                 </ul>
               )}
             </div>
+            {presence && <CorrectionHistory corrections={presence.corrections} onChanged={afterCorrection} />}
           </div>
         )}
       </SidePanel>
+
+      {selected && investigating && (
+        <PresenceInvestigation
+          employeeId={selected.employee_id}
+          day={selected._day || date}
+          onClose={() => {
+            setInvestigating(false);
+            loadPresence();
+          }}
+          onCorrected={afterCorrection}
+        />
+      )}
+      {selected && correctingEmp && (
+        <CorrectionForm
+          employee={{ employee_id: selected.employee_id, name: selected.name }}
+          day={selected._day || date}
+          initial={{ kind: selected.first_in ? "exit" : "entry", ts: undefined }}
+          attendance={selected}
+          onClose={() => setCorrectingEmp(false)}
+          onSaved={() => {
+            setCorrectingEmp(false);
+            afterCorrection();
+          }}
+        />
+      )}
 
       <Modal open={!!manage} onClose={() => { setManage(null); load(); }} title={manage || ""} width="max-w-6xl">
         {manage === "Requests" && <RequestsTab />}

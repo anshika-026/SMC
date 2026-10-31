@@ -152,9 +152,9 @@ export default function Dashboard() {
       label: "Footfall (inward entries)",
       value: String(f.entries),
       sub: f.change_pct == null ? "no data the day before" : `${f.change_pct >= 0 ? "+" : ""}${f.change_pct}% vs day before`,
-      to: "/footfall",
+      to: "/visitors?tab=footfall",
     },
-    f && { label: "Employee vs visitor traffic", value: `${f.employee_entries} / ${f.visitor_entries}`, sub: "employees / visitors", to: "/footfall" },
+    f && { label: "Employee vs visitor traffic", value: `${f.employee_entries} / ${f.visitor_entries}`, sub: "employees / visitors", to: "/visitors?tab=footfall" },
     st && {
       label: isToday ? "Current staff count" : "Peak staff inside",
       value: isToday ? String(st.inside_now) : String(st.peak_inside),
@@ -264,7 +264,7 @@ export default function Dashboard() {
         )}
 
         {f && (
-          <Section icon={Footprints} title="Footfall analytics" action={<Link to="/footfall">Open footfall</Link>}>
+          <Section icon={Footprints} title="Footfall analytics" action={<Link to="/visitors?tab=footfall">Open footfall</Link>}>
             <Figures
               items={[
                 ["Inward entries", String(f.entries)],

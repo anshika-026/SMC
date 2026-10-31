@@ -1,11 +1,16 @@
-import { useState } from "react";
-import { ArrowDownRight, ArrowRight, ArrowUpRight, ChevronDown } from "lucide-react";
+import { useRef, useState } from "react";
+import { ArrowDownRight, ArrowUpRight, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { Area, AreaChart, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
 
-// A clean analytics card: title + period, one metric at a time (the dots
-// switch between the card's metrics), a big number with a trend arrow, a soft
-// chart of that metric's real daily values (or a donut when it only exists
-// for today), a one-line insight, and an arrow that filters the log.
+// A clean analytics card: title + period, one metric at a time, a big number
+// with a trend arrow, a soft chart of that metric's real daily values (or a
+// donut when it only exists for today) and a one-line insight.
+//
+// The card is a small carousel of its metrics: the left/right arrow buttons, a
+// touch swipe (left = next, right = previous) and the keyboard's arrow keys all
+// move the same page index. Clicking anywhere else on the card (or Enter) opens
+// the detailed view of the metric currently shown (metric.onOpen); the arrows
+// and a swipe never do.
 //
 // metric: { key, label, value, display?, total?, series?: [{day, v}], better: "up" | "down" | null,
 //           insight, onOpen, people?: [{name, hint?, warn?}] (names shown above the chart) }
@@ -19,6 +24,7 @@ const TONES = {
 };
 
 const MAX_NAMES = 6;   // name chips shown before "+N more"
+const SWIPE_PX = 40;   // horizontal travel that counts as a swipe
 
 function shortDay(iso) {
   return new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
@@ -34,7 +40,7 @@ function Trend({ metric, tone }) {
   const good = metric.better ? (metric.better === "up") === up : null;
   const Icon = up ? ArrowUpRight : ArrowDownRight;
   const color = good === null ? tone.text : good ? "text-emerald-600" : "text-rose-500";
-  return <Icon size={18} className={`${color} -mt-4`} aria-label={up ? "up from the day before" : "down from the day before"} />;
+  return <Icon size={18} className={`${color} shrink-0 mt-0.5`} aria-label={up ? "up from the day before" : "down from the day before"} />;
 }
 
 function Chart({ metric, tone, id }) {
@@ -99,19 +105,82 @@ function Chart({ metric, tone, id }) {
   );
 }
 
+// Controls inside the card change the card, never open its detail.
+const stop = (e) => e.stopPropagation();
+const STOP = { onClick: stop, onKeyDown: stop, onTouchStart: stop, onTouchEnd: stop };
+
 export default function InsightCard({ title, tone = "blue", metrics, period, onPeriod }) {
   const [i, setI] = useState(0);
+  const [dir, setDir] = useState("next");   // which way the last page change went (slide animation)
+  const touch = useRef(null);               // where a touch started
+  const swipedAt = useRef(0);               // when the last swipe ended: a click right after it is part of the swipe
   const t = TONES[tone];
-  const m = metrics[Math.min(i, metrics.length - 1)];
+  const count = metrics.length;
+  const idx = Math.min(i, count - 1);
+  const m = metrics[idx];
   const chartId = `ic-${title.replace(/\W+/g, "")}-${m.key}`;
+  const prevM = metrics[(idx - 1 + count) % count];
+  const nextM = metrics[(idx + 1) % count];
+
+  const go = (step) => {
+    if (count < 2) return;
+    setDir(step > 0 ? "next" : "prev");
+    setI((x) => (Math.min(x, count - 1) + step + count) % count);
+  };
+  const open = () => m.onOpen?.();
+
+  const onTouchStart = (e) => {
+    const p = e.touches[0];
+    touch.current = { x: p.clientX, y: p.clientY };
+  };
+  const onTouchEnd = (e) => {
+    const start = touch.current;
+    touch.current = null;
+    if (!start) return;
+    const p = e.changedTouches[0];
+    const dx = p.clientX - start.x;
+    const dy = p.clientY - start.y;
+    // Mostly sideways and far enough: a swipe. A vertical drag stays a page scroll.
+    if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      swipedAt.current = Date.now();
+      go(dx < 0 ? 1 : -1);
+    }
+  };
+  const onClick = () => {
+    // Some browsers fire a click at the end of a swipe; never treat it as "open".
+    if (Date.now() - swipedAt.current < 500) return;
+    open();
+  };
+  const onKeyDown = (e) => {
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      go(1);
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      go(-1);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      open();
+    }
+  };
 
   return (
-    <div className="bg-white rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.035)] p-4 xl:p-5 flex flex-col h-full min-h-[300px] min-w-0">
+    <div
+      role="button"
+      tabIndex={0}
+      aria-roledescription="carousel"
+      aria-label={`${title}: ${m.label}, ${idx + 1} of ${count}. Left and right arrow keys change the view; Enter opens the details.`}
+      onClick={onClick}
+      onKeyDown={onKeyDown}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+      className="group bg-white rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.035)] p-4 xl:p-5 flex flex-col h-full min-h-[300px] min-w-0 cursor-pointer select-none overflow-hidden transition-shadow hover:shadow-[0_4px_16px_rgba(15,23,42,0.08)] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 [touch-action:pan-y]"
+    >
       {/* No outline: a white card on the page's light background, with only a very faint shadow. */}
       {/* The title is never cut off: it wraps above a compact period picker. */}
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-[13px] font-semibold text-ink-900 leading-snug min-w-0 break-words">{title}</h3>
-        <label className="relative shrink-0">
+        <label className="relative shrink-0" {...STOP}>
           <select
             value={period}
             onChange={(e) => onPeriod(e.target.value)}
@@ -124,71 +193,75 @@ export default function InsightCard({ title, tone = "blue", metrics, period, onP
         </label>
       </div>
 
-      <p className="text-[11px] text-slate-400 mt-3">{m.label}</p>
-      <div className="flex items-start gap-0.5 mt-1">
-        <span className="text-[28px] xl:text-[34px] leading-none font-light tracking-tight text-ink-900 tabular-nums">{m.display ?? m.value ?? "—"}</span>
-        <Trend metric={m} tone={t} />
-      </div>
-
-      {/* Who it is: names above the chart (metric.people), with "+N more". */}
-      {m.people && (
-        <div className="flex flex-wrap gap-1 mt-2.5" aria-label={`${m.label}: names`}>
-          {m.people.length === 0 ? (
-            <span className="text-[11px] text-slate-400">Nobody right now</span>
-          ) : (
-            <>
-              {m.people.slice(0, MAX_NAMES).map((p) => (
-                <span
-                  key={p.name}
-                  title={p.hint || p.name}
-                  className={`text-[11px] leading-none px-2 py-1 rounded-full whitespace-nowrap ${p.warn ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}
-                >
-                  {p.name}
-                </span>
-              ))}
-              {m.people.length > MAX_NAMES && (
-                <span title={m.people.slice(MAX_NAMES).map((p) => p.name).join(", ")} className="text-[11px] leading-none px-2 py-1 rounded-full bg-white text-slate-500 border border-slate-200">
-                  +{m.people.length - MAX_NAMES} more
-                </span>
-              )}
-            </>
-          )}
+      {/* The current view; it slides in from the side it came from. */}
+      <div key={m.key} className={`flex flex-col flex-1 min-h-0 ${dir === "next" ? "kpi-in-next" : "kpi-in-prev"}`}>
+        <p className="text-[11px] text-slate-400 mt-3">{m.label}</p>
+        <div className="flex items-start gap-0.5 mt-1">
+          <span className="text-[28px] xl:text-[34px] leading-none font-light tracking-tight text-ink-900 tabular-nums">{m.display ?? m.value ?? "—"}</span>
+          <Trend metric={m} tone={t} />
         </div>
-      )}
 
-      <div className={`${m.people ? "h-[72px]" : "h-[100px]"} mt-3 -mx-1`}>
-        <Chart metric={m} tone={t} id={chartId} />
+        {/* Who it is: names above the chart (metric.people), with "+N more". */}
+        {m.people && (
+          <div className="flex flex-wrap gap-1 mt-2.5" aria-label={`${m.label}: names`}>
+            {m.people.length === 0 ? (
+              <span className="text-[11px] text-slate-400">Nobody right now</span>
+            ) : (
+              <>
+                {m.people.slice(0, MAX_NAMES).map((p) => (
+                  <span
+                    key={p.name}
+                    title={p.hint || p.name}
+                    className={`text-[11px] leading-none px-2 py-1 rounded-full whitespace-nowrap ${p.warn ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}
+                  >
+                    {p.name}
+                  </span>
+                ))}
+                {m.people.length > MAX_NAMES && (
+                  <span title={m.people.slice(MAX_NAMES).map((p) => p.name).join(", ")} className="text-[11px] leading-none px-2 py-1 rounded-full bg-white text-slate-500 border border-slate-200">
+                    +{m.people.length - MAX_NAMES} more
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        <div className={`${m.people ? "h-[72px]" : "h-[100px]"} mt-3 -mx-1`}>
+          <Chart metric={m} tone={t} id={chartId} />
+        </div>
+
+        <p className="text-xs text-slate-500 leading-snug mt-auto pt-3">{m.insight}</p>
       </div>
 
-      <div className="flex items-end justify-between gap-3 mt-auto pt-3">
-        <p className="text-xs text-slate-500 leading-snug">{m.insight}</p>
-        {m.onOpen && (
-          <button
-            type="button"
-            onClick={m.onOpen}
-            title="Show these employees"
-            className={`shrink-0 w-8 h-8 rounded-full grid place-items-center ${t.soft} hover:scale-105 transition-transform`}
-          >
-            <ArrowRight size={14} />
-          </button>
+      <div className="flex items-center justify-between gap-2 mt-3">
+        <span className={`text-[11px] font-medium ${t.text} opacity-60 group-hover:opacity-100 transition-opacity`}>{m.onOpen ? "View details" : ""}</span>
+        {count > 1 && (
+          <div className="flex items-center gap-1" {...STOP}>
+            <button
+              type="button"
+              aria-label={`Previous view: ${prevM.label}`}
+              title={prevM.label}
+              onClick={() => go(-1)}
+              className={`w-8 h-8 rounded-full grid place-items-center ${t.soft} hover:scale-105 active:scale-95 transition-transform`}
+            >
+              <ChevronLeft size={15} />
+            </button>
+            <span className="text-[11px] text-slate-500 tabular-nums w-9 text-center" aria-live="polite">
+              {idx + 1} / {count}
+            </span>
+            <button
+              type="button"
+              aria-label={`Next view: ${nextM.label}`}
+              title={nextM.label}
+              onClick={() => go(1)}
+              className={`w-8 h-8 rounded-full grid place-items-center ${t.soft} hover:scale-105 active:scale-95 transition-transform`}
+            >
+              <ChevronRight size={15} />
+            </button>
+          </div>
         )}
       </div>
-
-      {metrics.length > 1 && (
-        <div className="flex justify-center gap-1.5 mt-3" role="tablist" aria-label={`${title} metrics`}>
-          {metrics.map((x, k) => (
-            <button
-              key={x.key}
-              type="button"
-              role="tab"
-              aria-selected={k === i}
-              title={x.label}
-              onClick={() => setI(k)}
-              className={`h-1 rounded-full transition-all ${k === i ? "w-4 bg-slate-700" : "w-2.5 bg-slate-200 hover:bg-slate-300"}`}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

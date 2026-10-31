@@ -19,6 +19,10 @@ Sources, in order of authority for a day:
   in / out times         -> confirmed gate crossings (staff_occupancy visits of
                             that employee); face sightings (attendance_days)
                             when the gate never identified them
+  manual corrections     -> attendance_corrections: an admin's entry / exit
+                            time or "presence verified" (with a reason), applied
+                            on top; the recorded times stay as they were and
+                            every correction (and its withdrawal) is kept
 """
 
 from __future__ import annotations
@@ -151,6 +155,26 @@ def init_db() -> None:
                    decision_note TEXT)"""
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leave_requests_emp ON leave_requests (employee_id, day_from)")
+        # Manual attendance corrections. Never deleted: a withdrawn one is
+        # marked voided (who, when, why), so the full history stays.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS attendance_corrections (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   employee_id TEXT NOT NULL,
+                   day TEXT NOT NULL,              -- YYYY-MM-DD
+                   kind TEXT NOT NULL,             -- entry | exit | presence_verified
+                   ts REAL NOT NULL,               -- the corrected time / when they were seen present
+                   reason TEXT NOT NULL,
+                   evidence TEXT,                  -- e.g. "recognised on CAM2 at 10:42 AM"
+                   original_ts REAL,               -- what the record said before (entry / exit)
+                   created_at REAL NOT NULL,
+                   created_by TEXT,
+                   voided INTEGER NOT NULL DEFAULT 0,
+                   voided_at REAL,
+                   voided_by TEXT,
+                   void_reason TEXT)"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_attendance_corrections ON attendance_corrections (employee_id, day)")
         if conn.execute("SELECT COUNT(*) FROM leave_types").fetchone()[0] == 0:
             conn.executemany("INSERT INTO leave_types (code, name, annual_days, carry_forward_max, expires_months) VALUES (?, ?, ?, ?, ?)",
                              DEFAULT_LEAVE_TYPES)
@@ -532,6 +556,112 @@ def _sessions_between(start_ts: float, end_ts: float) -> dict[tuple[str, str], l
     return out
 
 
+# --------------------------------------------------------------------------- manual corrections
+
+CORRECTION_KINDS = {"entry": "Entry time", "exit": "Exit time", "presence_verified": "Presence verified"}
+
+
+def _correction_view(r) -> dict:
+    d = dict(r)
+    d["voided"] = bool(d["voided"])
+    d["label"] = CORRECTION_KINDS.get(d["kind"], d["kind"])
+    return d
+
+
+def list_corrections(employee_id: str, day: str | None = None) -> list[dict]:
+    """Every correction for the employee (that day, if given), withdrawn ones
+    included, oldest first: the audit history."""
+    q, params = "SELECT * FROM attendance_corrections WHERE employee_id = ?", [employee_id]
+    if day:
+        q += " AND day = ?"
+        params.append(day)
+    with _conn() as conn:
+        return [_correction_view(r) for r in conn.execute(q + " ORDER BY created_at, id", params)]
+
+
+def _active_corrections(day_from: str, day_to: str) -> dict[tuple[str, str], list[dict]]:
+    with _conn() as conn:
+        rows = conn.execute("SELECT * FROM attendance_corrections WHERE voided = 0 AND day >= ? AND day <= ? ORDER BY created_at, id",
+                            (day_from, day_to)).fetchall()
+    out: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        out.setdefault((r["employee_id"], r["day"]), []).append(_correction_view(r))
+    return out
+
+
+def add_correction(employee_id: str, day: str, kind: str, ts: float, reason: str, evidence: str | None = None,
+                   actor: dict | None = None, now: float | None = None) -> dict:
+    """An admin's correction of one employee's day. Camera evidence is only
+    ever attached as context; nothing is corrected without this explicit call."""
+    now = now if now is not None else time.time()
+    if employee_directory.get_employee(employee_id) is None:
+        raise ValueError("Employee not found.")
+    if kind not in CORRECTION_KINDS:
+        raise ValueError("Correction must be an entry time, an exit time or presence verified.")
+    datetime.date.fromisoformat(day)
+    reason = (reason or "").strip()
+    if len(reason) < 3:
+        raise ValueError("Give the reason for the correction.")
+    ts = float(ts)
+    start = _at(day, "00:00")
+    if not start <= ts < start + 86400:
+        raise ValueError("The time must be on the same day.")
+    if ts > now + 60:
+        raise ValueError("The time cannot be in the future.")
+    current = classify_range(day, day, employee_ids=[employee_id], now=now)[0]
+    if kind == "exit" and current["first_in"] and ts < current["first_in"]:
+        raise ValueError("The exit cannot be before the entry.")
+    if kind == "entry" and current["last_out"] and ts > current["last_out"] and not current["inside_now"]:
+        raise ValueError("The entry cannot be after the exit.")
+    original = current.get("original_first_in") if kind == "entry" else current.get("original_last_out") if kind == "exit" else None
+    with _conn() as conn:
+        # One active correction per kind and day: a new one replaces (voids) the old.
+        conn.execute("UPDATE attendance_corrections SET voided = 1, voided_at = ?, voided_by = ?, void_reason = 'replaced by a newer correction' "
+                     "WHERE employee_id = ? AND day = ? AND kind = ? AND voided = 0",
+                     (now, audit._actor(actor), employee_id, day, kind))
+        cur = conn.execute(
+            "INSERT INTO attendance_corrections (employee_id, day, kind, ts, reason, evidence, original_ts, created_at, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (employee_id, day, kind, ts, reason[:500], (evidence or "").strip()[:500] or None, original, now, audit._actor(actor)))
+        cid = cur.lastrowid
+    audit.record("attendance.correction_added", actor, f"employee:{employee_id}", day=day, kind=kind, ts=ts, reason=reason,
+                 evidence=evidence, original_ts=original, correction_id=cid)
+    return {"correction_id": cid, "row": classify_range(day, day, employee_ids=[employee_id], now=now)[0]}
+
+
+def void_correction(correction_id: int, reason: str, actor: dict | None = None, now: float | None = None) -> dict:
+    now = now if now is not None else time.time()
+    reason = (reason or "").strip()
+    if len(reason) < 3:
+        raise ValueError("Give the reason for withdrawing the correction.")
+    with _conn() as conn:
+        r = conn.execute("SELECT * FROM attendance_corrections WHERE id = ?", (correction_id,)).fetchone()
+        if r is None:
+            raise KeyError(correction_id)
+        if r["voided"]:
+            raise ValueError("This correction was already withdrawn.")
+        conn.execute("UPDATE attendance_corrections SET voided = 1, voided_at = ?, voided_by = ?, void_reason = ? WHERE id = ?",
+                     (now, audit._actor(actor), reason[:500], correction_id))
+    audit.record("attendance.correction_withdrawn", actor, f"employee:{r['employee_id']}", day=r["day"], kind=r["kind"],
+                 correction_id=correction_id, reason=reason)
+    return {"row": classify_range(r["day"], r["day"], employee_ids=[r["employee_id"]], now=now)[0]}
+
+
+def _apply_corrections(first_in, last_out, corrections: list[dict]) -> tuple:
+    """(first_in, last_out, applied) with the active corrections on top of
+    the recorded times. The latest correction of each kind wins."""
+    latest = {}
+    for c in corrections or []:
+        latest[c["kind"]] = c
+    if "entry" in latest:
+        first_in = latest["entry"]["ts"]
+    elif "presence_verified" in latest and first_in is None:
+        first_in = latest["presence_verified"]["ts"]   # verified present at that time; no earlier record
+    if "exit" in latest:
+        last_out = latest["exit"]["ts"]
+    return first_in, last_out, latest
+
+
 # --------------------------------------------------------------------------- classification
 
 def _sightings_between(start_ts: float, end_ts: float) -> dict[tuple[str, str], list[dict]]:
@@ -614,7 +744,7 @@ def _at(day: str, hm: str) -> float:
 def classify(employee_id: str, day: str, *, policy: dict, seen: dict | None, sessions: list[dict],
              approved: list[dict], holidays: list[dict], now: float, site: str | None = None,
              sightings: list[dict] | None = None, gate_cams: set[int] | None = None,
-             camera_names: dict[int, str] | None = None) -> dict:
+             camera_names: dict[int, str] | None = None, corrections: list[dict] | None = None) -> dict:
     """One employee's day: status plus every figure the reports need."""
     is_today = day == datetime.date.fromtimestamp(now).isoformat()
     weekday = DAYS[datetime.date.fromisoformat(day).weekday()]
@@ -627,6 +757,8 @@ def classify(employee_id: str, day: str, *, policy: dict, seen: dict | None, ses
     first_in = min([s["entry"] for s in sessions] + ([seen["first_seen"]] if seen else []), default=None)
     exits = [s["exit"] for s in sessions if s["exit"]]
     last_out = max(exits + ([seen["last_seen"]] if seen else []), default=None) if not any(s["inside"] for s in sessions) else None
+    original_first_in, original_last_out = first_in, last_out
+    first_in, last_out, corrected = _apply_corrections(first_in, last_out, corrections)
     inside_seconds = sum(((s["exit"] or (now if s["inside"] else s["entry"])) - s["entry"]) for s in sessions)
     outside = []
     ordered = sorted(sessions, key=lambda s: s["entry"])
@@ -643,8 +775,8 @@ def classify(employee_id: str, day: str, *, policy: dict, seen: dict | None, ses
         # No per-camera events (older data): seen by face recently.
         loc = {"location": "inside", "location_detail": "seen by face recently", "location_at": seen["last_seen"]}
     inside_now = loc["location"] == "inside"
-    missing_exit = any(s["exit"] and not s["exit_confirmed"] for s in sessions)
-    missing_entry = bool(seen) and not sessions   # seen by face, never identified at the gate
+    missing_exit = any(s["exit"] and not s["exit_confirmed"] for s in sessions) and "exit" not in corrected
+    missing_entry = bool(seen) and not sessions and "entry" not in corrected   # seen by face, never identified at the gate
     long_out_limit = policy["long_outside_minutes"] * 60
     long_outside = any(g > long_out_limit for g in outside) or (current_out or 0) > long_out_limit
 
@@ -703,7 +835,11 @@ def classify(employee_id: str, day: str, *, policy: dict, seen: dict | None, ses
         "outside_seconds": int(sum(outside) + (current_out or 0)),
         "outside_periods": len(outside) + (1 if current_out else 0),
         "long_outside": long_outside,
-        "missing_exit": missing_exit or loc["location"] == "likely_outside", "missing_entry": missing_entry,
+        "missing_exit": (missing_exit or loc["location"] == "likely_outside") and "exit" not in corrected, "missing_entry": missing_entry,
+        # Manual corrections in force, and the recorded times they replaced.
+        "corrected": bool(corrected), "corrections": list(corrected.values()),
+        "presence_verified": "presence_verified" in corrected,
+        "original_first_in": original_first_in, "original_last_out": original_last_out,
         "sessions": [{"entry": s["entry"], "exit": s["exit"], "exit_confirmed": s["exit_confirmed"], "inside": s["inside"]} for s in ordered],
         "source": "gate" if sessions else ("face" if seen else None),
         "last_camera": seen.get("last_camera") if seen else None,
@@ -731,6 +867,7 @@ def classify_range(day_from: str, day_to: str, employee_ids: list[str] | None = 
     camera_names = {c["id"]: c["name"] for c in camera_db.list_cameras()}
     approved = _approved_between(day_from, day_to)
     holidays = _holidays_between(day_from, day_to)
+    corrections = _active_corrections(day_from, day_to)
     today = datetime.date.fromtimestamp(now)
     out = []
     d = start
@@ -739,7 +876,8 @@ def classify_range(day_from: str, day_to: str, employee_ids: list[str] | None = 
         for emp in ids:
             out.append(classify(emp, iso, policy=policy, seen=seen.get((emp, iso)), sessions=sessions.get((emp, iso), []),
                                 approved=approved.get((emp, iso), []), holidays=holidays.get(iso, []), now=now,
-                                sightings=sightings.get((emp, iso), []), gate_cams=gate_cams, camera_names=camera_names))
+                                sightings=sightings.get((emp, iso), []), gate_cams=gate_cams, camera_names=camera_names,
+                                corrections=corrections.get((emp, iso), [])))
         d += datetime.timedelta(days=1)
     return out
 

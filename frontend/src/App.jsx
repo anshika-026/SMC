@@ -20,7 +20,6 @@ const People = lazy(() => import("./pages/People"));
 const Attendance = lazy(() => import("./pages/Attendance"));
 const FaceRecognition = lazy(() => import("./pages/FaceRecognition"));
 const Workforce = lazy(() => import("./pages/Workforce"));
-const Footfall = lazy(() => import("./pages/Footfall"));
 const VisitorManagement = lazy(() => import("./pages/VisitorManagement"));
 const StaffCount = lazy(() => import("./pages/StaffCount"));
 const FootfallUat = lazy(() => import("./pages/FootfallUat"));
@@ -99,7 +98,7 @@ export default function App() {
             <Route path="/staff" element={<Feature name="staff_count"><Page><StaffCount /></Page></Feature>} />
             <Route path="/workforce" element={<Feature name="desk_analytics"><Page><Workforce /></Page></Feature>} />
             <Route path="/visitors" element={<Feature name="visitors"><Page><VisitorManagement /></Page></Feature>} />
-            <Route path="/footfall" element={<Feature name="footfall"><Page><Footfall /></Page></Feature>} />
+            <Route path="/footfall" element={<Navigate to="/visitors?tab=footfall" replace />} />
             <Route path="/footfall-uat" element={<Feature name="footfall"><AdminRoute><Page><FootfallUat /></Page></AdminRoute></Feature>} />
             <Route path="/cameras" element={<AdminRoute><Page><CameraManagement /></Page></AdminRoute>} />
             <Route path="/sites" element={<AdminRoute><Page><SiteManagement /></Page></AdminRoute>} />

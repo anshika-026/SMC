@@ -7,12 +7,13 @@ the UAT panel's reset / people / snapshot endpoints.
 Mount with: app.include_router(footfall_routes.router) in main.py
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app import analytics_settings, audit, auth, camera_db, camera_stream
 from app.footfall import service
+from app.reid import reid_db
 
 router = APIRouter(prefix="/api/footfall", tags=["footfall"])
 
@@ -23,6 +24,34 @@ def footfall_summary(_: dict = Depends(auth.require_admin)):
     gate(s) they used), plus the per-gate breakdown, hourly arrivals vs
     yesterday, and today's visitor list."""
     return service.summary()
+
+
+@router.get("/history")
+def footfall_history(date_from: str = Query(..., alias="from"), date_to: str = Query(..., alias="to"),
+                     _: dict = Depends(auth.require_admin)):
+    """Daily entries / exits / employee entries for a date range (max 366 days),
+    including events kept from before a count reset."""
+    import datetime
+
+    try:
+        a, b = datetime.date.fromisoformat(date_from), datetime.date.fromisoformat(date_to)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Dates must look like 2026-10-31")
+    if b < a or (b - a).days > 366:
+        raise HTTPException(status_code=422, detail="Pick a range of up to one year")
+    return {"days": reid_db.footfall_daily(a.isoformat(), b.isoformat())}
+
+
+@router.get("/day")
+def footfall_day(date: str, _: dict = Depends(auth.require_admin)):
+    """One day: entries, exits, employee vs visitor entries, arrivals per hour and the peak hour."""
+    import datetime
+
+    try:
+        datetime.date.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Dates must look like 2026-10-31")
+    return {"date": date, **service.day_stats(date)}
 
 
 @router.get("/people")

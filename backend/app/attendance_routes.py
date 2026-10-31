@@ -11,7 +11,7 @@ import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app import attendance, auth
+from app import attendance, auth, presence, workforce
 
 router = APIRouter(prefix="/api/attendance", tags=["attendance"])
 
@@ -60,6 +60,89 @@ from app import workforce  # noqa: E402
 
 def _bad(e: Exception):
     raise HTTPException(status_code=422, detail=str(e))
+
+
+# ---- Presence investigation and manual corrections (presence.py, workforce.py)
+
+@router.get("/main-hall")
+def main_hall(_: dict = Depends(auth.require_admin)):
+    """The two cameras covering the main hall (Camera 01 left, Camera 02 right)."""
+    return presence.get_main_hall()
+
+
+class MainHallIn(BaseModel):
+    camera_ids: list[int]
+
+
+@router.put("/main-hall")
+def set_main_hall(body: MainHallIn, principal: dict = Depends(auth.require_admin)):
+    try:
+        return presence.set_main_hall(body.camera_ids, principal)
+    except ValueError as e:
+        _bad(e)
+
+
+@router.get("/cameras/locations")
+def camera_locations(_: dict = Depends(auth.require_admin)):
+    """Every camera with its mapped location (from configuration) and stream availability."""
+    return {"cameras": presence.camera_directory()}
+
+
+class ZoneIn(BaseModel):
+    zone: str | None = None
+
+
+@router.put("/cameras/{camera_id}/location")
+def set_camera_location(camera_id: int, body: ZoneIn, principal: dict = Depends(auth.require_admin)):
+    try:
+        return {"cameras": presence.set_camera_zone(camera_id, body.zone, principal)}
+    except ValueError as e:
+        _bad(e)
+
+
+@router.get("/employees/{employee_id}/presence")
+def employee_presence(employee_id: str, date: str | None = None, _: dict = Depends(auth.require_admin)):
+    """Where the employee has been seen (live and today), and whether that is verified."""
+    try:
+        return presence.investigate(employee_id, _valid_day(date) if date else None)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+
+@router.get("/employees/{employee_id}/corrections")
+def employee_corrections(employee_id: str, date: str | None = None, _: dict = Depends(auth.require_admin)):
+    return {"corrections": workforce.list_corrections(employee_id, _valid_day(date) if date else None)}
+
+
+class CorrectionIn(BaseModel):
+    employee_id: str
+    day: str
+    kind: str
+    ts: float
+    reason: str
+    evidence: str | None = None
+
+
+@router.post("/corrections")
+def add_correction(body: CorrectionIn, principal: dict = Depends(auth.require_admin)):
+    try:
+        return workforce.add_correction(body.employee_id, _valid_day(body.day), body.kind, body.ts, body.reason, body.evidence, principal)
+    except ValueError as e:
+        _bad(e)
+
+
+class VoidIn(BaseModel):
+    reason: str
+
+
+@router.post("/corrections/{correction_id}/withdraw")
+def withdraw_correction(correction_id: int, body: VoidIn, principal: dict = Depends(auth.require_admin)):
+    try:
+        return workforce.void_correction(correction_id, body.reason, principal)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    except ValueError as e:
+        _bad(e)
 
 
 @router.get("/overview")

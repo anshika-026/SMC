@@ -532,6 +532,43 @@ def footfall_history(days: int = 14) -> list[dict]:
     return [{"date": r[0], "unique_count": r[1]} for r in rows]
 
 
+
+def footfall_daily(day_from: str, day_to: str) -> list[dict]:
+    """Per local day in [day_from, day_to]: entries (unique people counted that
+    day, each once), exits (outward crossings at entry-line gates) and employee
+    entries (named by face at the gate). Counts survive a count reset: events
+    archived in footfall_history are included. Every day in the range is
+    returned, 0 where nothing was counted."""
+    import datetime
+
+    start = datetime.date.fromisoformat(day_from)
+    end = datetime.date.fromisoformat(day_to)
+    t0 = datetime.datetime.combine(start, datetime.time()).timestamp()
+    t1 = datetime.datetime.combine(end + datetime.timedelta(days=1), datetime.time()).timestamp()
+    with get_connection() as conn:
+        entries = dict(conn.execute(
+            "SELECT day, COUNT(DISTINCT p) FROM ("
+            "  SELECT date(ts, 'unixepoch', 'localtime') AS day, 'live-' || person_id AS p FROM reid_events "
+            "  WHERE person_id IS NOT NULL AND event_type != ? AND ts >= ? AND ts < ? "
+            "  UNION ALL "
+            "  SELECT date(ts, 'unixepoch', 'localtime'), 'archived-' || person_ref FROM footfall_history "
+            "  WHERE event_type != ? AND ts >= ? AND ts < ?"
+            ") GROUP BY day", (EVENT_EXIT, t0, t1, EVENT_EXIT, t0, t1)).fetchall())
+        exits = dict(conn.execute(
+            "SELECT date(ts, 'unixepoch', 'localtime'), COUNT(*) FROM reid_events WHERE event_type = ? AND ts >= ? AND ts < ? GROUP BY 1",
+            (EVENT_EXIT, t0, t1)).fetchall())
+        employees = dict(conn.execute(
+            "SELECT day, COUNT(*) FROM footfall_clips WHERE employee_id IS NOT NULL AND day >= ? AND day <= ? GROUP BY day",
+            (day_from, day_to)).fetchall())
+    out, d = [], start
+    while d <= end:
+        iso = d.isoformat()
+        n = entries.get(iso, 0)
+        out.append({"day": iso, "entries": n, "exits": exits.get(iso, 0), "employee_entries": min(employees.get(iso, 0), n)})
+        d += datetime.timedelta(days=1)
+    return out
+
+
 # --- Per-camera config (incl. ROI) ------------------------------------------
 
 def get_camera_config(camera_id: int) -> dict:

@@ -1,101 +1,182 @@
-import { Activity, Building, Clock3, TrendingUp } from "lucide-react";
-import { dur } from "./shared";
+import { useEffect, useState } from "react";
+import InsightCard from "../workforce/InsightCard";
+import * as api from "../../api/client";
+import { shiftIso, todayIso } from "../workforce/shared";
 
-// The four consolidated KPI cards. Every number is from visit records
-// (/visitor-records/kpis); a row with onClick filters the records table.
+// The three Visitor Management KPI cards, in the Attendance card style
+// (InsightCard: arrows / swipe page through a card's views, a click opens the
+// detailed view of the view shown):
+//   Visitor Activity   today's visitors       -> the visitor records, filtered
+//   Visitor Trends     visits over time       -> Analytics
+//   Footfall Analytics people entering gates  -> the Footfall view
+// Visitor numbers: /visitor-records/kpis and the last 30 days of visits.
+// Footfall numbers: /footfall/day (today) and /footfall/history (30 days).
 
-export default function VisitorKpiCards({ k, onFilter, onOpenVisitor }) {
-  const v = (x) => (k ? x : null);
-  const cards = [
-    {
-      title: "Visitor Activity", icon: Activity, tone: "text-brand-600 bg-brand-50",
-      rows: [
-        { label: "Total visitors today", value: v(k?.visitors_today), onClick: () => onFilter({ preset: "today" }) },
-        { label: "First-time visitors", value: v(k?.first_time_today), onClick: () => onFilter({ preset: "today", type: "first" }) },
-        { label: "Repeat visitors", value: v(k?.repeat_today), onClick: () => onFilter({ preset: "today", type: "repeat" }) },
-      ],
-    },
-    {
-      title: "Current Premises Status", icon: Building, tone: "text-emerald-600 bg-emerald-50",
-      rows: [
-        { label: "Currently inside", value: v(k?.inside_now), strong: true, onClick: () => onFilter({ preset: "all", status: "in" }), names: k?.inside_names },
-        { label: "Checked out", value: v(k?.checked_out_today), onClick: () => onFilter({ preset: "today", status: "out" }) },
-        { label: "Pending check-in", value: v(k?.pending_today), onClick: () => onFilter({ preset: "today", status: "pending" }) },
-      ],
-    },
-    {
-      title: "Visit Duration", icon: Clock3, tone: "text-violet-600 bg-violet-50",
-      rows: [
-        { label: "Average visit duration", value: k ? dur(k.average_duration_seconds, "No data") : null, sub: k ? `${k.duration_measured} completed visit${k.duration_measured === 1 ? "" : "s"}` : "" },
-        { label: "Average waiting time", value: k ? dur(k.average_waiting_seconds, "Not recorded") : null, sub: k ? `${k.waiting_measured} with a meeting start` : "" },
-        { label: `Long-staying (> ${k ? k.long_stay_minutes : 120} min)`, value: v(k?.long_staying), warn: true, names: k?.long_staying_names },
-      ],
-    },
-    {
-      title: "Visitor Trends", icon: TrendingUp, tone: "text-sky-600 bg-sky-50",
-      rows: [
-        { label: "Total visits this month", value: v(k?.visits_this_month), onClick: () => onFilter({ preset: "month" }) },
-        { label: "Repeat visits this month", value: v(k?.repeat_visits_this_month), onClick: () => onFilter({ preset: "month", type: "repeat" }) },
-      ],
-      frequent: k?.most_frequent,
-    },
-  ];
+const DAYS = 30;
+
+function hourLabel(h) {
+  if (h === null || h === undefined) return "—";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}${h < 12 ? "am" : "pm"}`;
+}
+
+export default function VisitorKpiCards({ k, onFilter, onAnalytics, onFootfall, refreshKey }) {
+  const [period, setPeriod] = useState({ activity: "week", trends: "month", footfall: "week" });
+  const [rows, setRows] = useState([]);
+  const [ffDays, setFfDays] = useState([]);
+  const [ffToday, setFfToday] = useState(null);
+
+  useEffect(() => {
+    const today = todayIso();
+    api.vr
+      .visits({ from: shiftIso(today, -(DAYS - 1)), to: today, limit: 5000 })
+      .then((d) => setRows(d.visits))
+      .catch(() => setRows([]));
+    api.getFootfallHistory(shiftIso(today, -(DAYS - 1)), today).then((d) => setFfDays(d.days)).catch(() => setFfDays([]));
+    api.getFootfallDay(today).then(setFfToday).catch(() => setFfToday(null));
+  }, [k, refreshKey]);
+
+  const span = (p) => (p === "month" ? DAYS : 7);
+  // Daily values of fn(visits of that day) for the last 7 / 30 days.
+  const series = (fn, p) => {
+    const days = span(p);
+    const today = todayIso();
+    return Array.from({ length: days }, (_, i) => {
+      const day = shiftIso(today, i - days + 1);
+      return { day, v: fn(rows.filter((r) => r.visit_date === day)) };
+    });
+  };
+  const ffSeries = (key, p) => ffDays.slice(-span(p)).map((d) => ({ day: d.day, v: d[key] }));
+  const count = (test) => (list) => list.filter(test).length;
+  const visitors = (test = () => true) => (list) => new Set(list.filter(test).map((r) => r.visitor_id)).size;
+  const n = (x) => (k ? x : null);
+  const plural = (x, one, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
+  const ff = ffToday;
+  const peakCount = ff && ff.peak_hour != null ? ff.hourly.find((h) => h.hour === ff.peak_hour)?.entries ?? 0 : 0;
+  const week = ffDays.slice(-7).reduce((a, d) => a + d.entries, 0);
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-5">
-      {cards.map((c) => (
-        <div key={c.title} className="bg-white rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.05)] p-4 min-w-0 flex flex-col">
-          <div className="flex items-center gap-2 mb-3">
-            <span className={`w-7 h-7 rounded-lg grid place-items-center ${c.tone}`}><c.icon size={15} /></span>
-            <h3 className="text-[13px] font-semibold text-ink-900">{c.title}</h3>
-          </div>
-          <div className="space-y-2.5 flex-1">
-            {c.rows.map((r) => (
-              <button
-                key={r.label}
-                type="button"
-                disabled={!r.onClick}
-                onClick={r.onClick}
-                className={`w-full text-left flex items-baseline justify-between gap-2 rounded-lg -mx-1.5 px-1.5 py-0.5 ${r.onClick ? "hover:bg-slate-50" : "cursor-default"}`}
-              >
-                <span className="text-xs text-slate-500 min-w-0">
-                  {r.label}
-                  {r.sub && <span className="block text-[10px] text-slate-400">{r.sub}</span>}
-                </span>
-                <span className={`tabular-nums font-semibold ${r.strong ? "text-2xl" : "text-lg"} ${r.strong ? "text-emerald-700" : r.warn && r.value > 0 ? "text-amber-600" : "text-ink-900"}`}>
-                  {r.value ?? "—"}
-                </span>
-              </button>
-            ))}
-            {c.rows.some((r) => r.names?.length) && (
-              <div className="flex flex-wrap gap-1 pt-1">
-                {c.rows.flatMap((r) => (r.names || []).map((n) => (
-                  <span key={`${r.label}-${n}`} className={`text-[11px] px-2 py-0.5 rounded-full ${r.warn ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{n}</span>
-                )))}
-              </div>
-            )}
-            {c.frequent !== undefined && (
-              <div className="pt-1">
-                <p className="text-xs text-slate-500 mb-1">Most frequent visitors</p>
-                {!c.frequent?.length ? (
-                  <p className="text-[11px] text-slate-400">No repeat visitors this month yet.</p>
-                ) : (
-                  <ul className="space-y-0.5">
-                    {c.frequent.slice(0, 3).map((f) => (
-                      <li key={f.visitor_id}>
-                        <button type="button" onClick={() => onOpenVisitor(f.visitor_id)} className="w-full flex justify-between text-xs hover:text-brand-600">
-                          <span className="truncate text-ink-900">{f.name}</span>
-                          <span className="text-slate-500 shrink-0">{f.visits} visits</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      ))}
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-stretch mb-5">
+      <InsightCard
+        title="Visitor Activity"
+        tone="blue"
+        period={period.activity}
+        onPeriod={(p) => setPeriod((x) => ({ ...x, activity: p }))}
+        metrics={[
+          {
+            key: "visitors",
+            label: "Visitors today",
+            value: n(k?.visitors_today),
+            series: series(visitors(), period.activity),
+            better: "up",
+            insight: k ? `${plural(k.visitors_today, "visitor")} registered for today; ${k.inside_now} inside now.` : "Loading…",
+            onOpen: () => onFilter({ preset: "today" }),
+          },
+          {
+            key: "first",
+            label: "First-time visitors",
+            value: n(k?.first_time_today),
+            series: series(visitors((r) => r.first_visit), period.activity),
+            insight: k ? `${plural(k.first_time_today, "visitor")} came for the first time today.` : "Loading…",
+            onOpen: () => onFilter({ preset: "today", type: "first" }),
+          },
+          {
+            key: "repeat",
+            label: "Repeat visitors",
+            value: n(k?.repeat_today),
+            series: series(visitors((r) => !r.first_visit), period.activity),
+            insight: k ? `${plural(k.repeat_today, "visitor")} had visited before.` : "Loading…",
+            onOpen: () => onFilter({ preset: "today", type: "repeat" }),
+          },
+          {
+            key: "pending",
+            label: "Expected, not checked in",
+            value: n(k?.pending_today),
+            series: series(count((r) => r.status === "pending"), period.activity),
+            better: "down",
+            people: k ? (k.pending_names || []).map((name) => ({ name })) : undefined,
+            insight: k ? (k.pending_today ? `${plural(k.pending_today, "registered visitor")} not checked in yet.` : "Everyone registered today has checked in.") : "Loading…",
+            onOpen: () => onFilter({ preset: "today", status: "pending" }),
+          },
+        ]}
+      />
+      <InsightCard
+        title="Visitor Trends"
+        tone="slate"
+        period={period.trends}
+        onPeriod={(p) => setPeriod((x) => ({ ...x, trends: p }))}
+        metrics={[
+          {
+            key: "month",
+            label: "Visits this month",
+            value: n(k?.visits_this_month),
+            series: series((list) => list.length, period.trends),
+            better: "up",
+            insight: k ? `${plural(k.visits_this_month, "visit")} so far this month. Open for daily, weekly and monthly reports.` : "Loading…",
+            onOpen: onAnalytics,
+          },
+          {
+            key: "repeat_month",
+            label: "Repeat visits this month",
+            value: n(k?.repeat_visits_this_month),
+            series: series(count((r) => !r.first_visit), period.trends),
+            insight: k ? `${plural(k.repeat_visits_this_month, "visit")} by people who had visited before.` : "Loading…",
+            onOpen: onAnalytics,
+          },
+          {
+            key: "frequent",
+            label: "Most frequent visitors",
+            value: n(k?.most_frequent?.length),
+            total: Math.max(k?.most_frequent?.length || 0, 1),
+            people: k ? k.most_frequent.map((f) => ({ name: `${f.name} · ${f.visits}`, hint: `${f.visits} visits this month` })) : undefined,
+            insight: k ? (k.most_frequent.length ? "Visitors with more than one visit this month." : "No repeat visitors this month yet.") : "Loading…",
+            onOpen: onAnalytics,
+          },
+        ]}
+      />
+      <InsightCard
+        title="Footfall Analytics"
+        tone="teal"
+        period={period.footfall}
+        onPeriod={(p) => setPeriod((x) => ({ ...x, footfall: p }))}
+        metrics={[
+          {
+            key: "ff_entries",
+            label: "People entering today",
+            value: ff ? ff.entries : null,
+            series: ffSeries("entries", period.footfall),
+            better: "up",
+            insight: ff ? `${plural(ff.entries, "person", "people")} counted at the gates today (${week} this week).` : "Loading…",
+            onOpen: onFootfall,
+          },
+          {
+            key: "ff_exits",
+            label: "Exits today",
+            value: ff ? ff.exits : null,
+            series: ffSeries("exits", period.footfall),
+            insight: ff ? (ff.gates_without_entry_line ? "Exits are counted only at gates with an entry line." : `${plural(ff.exits, "exit")} through the gates today.`) : "Loading…",
+            onOpen: onFootfall,
+          },
+          {
+            key: "ff_peak",
+            label: "Peak hour today",
+            value: peakCount,
+            display: ff ? (ff.peak_hour == null ? "—" : `${hourLabel(ff.peak_hour)}–${hourLabel((ff.peak_hour + 1) % 24)}`) : null,
+            total: Math.max(ff?.entries || 0, 1),
+            insight: ff ? (ff.peak_hour == null ? "Nobody counted yet today." : `${plural(peakCount, "arrival")} in the busiest hour.`) : "Loading…",
+            onOpen: onFootfall,
+          },
+          {
+            key: "ff_split",
+            label: "Employees / others",
+            value: ff ? ff.visitor_entries : null,
+            display: ff ? `${ff.employee_entries} / ${ff.visitor_entries}` : null,
+            total: Math.max(ff?.entries || 0, 1),
+            insight: ff ? "Employees are those named by face at the gate; everyone else counts as others." : "Loading…",
+            onOpen: onFootfall,
+          },
+        ]}
+      />
     </div>
   );
 }

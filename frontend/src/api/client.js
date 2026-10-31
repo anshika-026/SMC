@@ -597,6 +597,17 @@ export const hr = {
   addRequest: (r) => request("/attendance/requests", { method: "POST", body: JSON.stringify(r) }),
   decide: (id, decision, note = "") =>
     request(`/attendance/requests/${id}/decision`, { method: "POST", body: JSON.stringify({ decision, note }) }),
+  // Presence investigation (backend presence.py) and manual corrections (workforce.py).
+  presence: (employeeId, date) => request(`/attendance/employees/${encodeURIComponent(employeeId)}/presence${qs({ date })}`),
+  corrections: (employeeId, date) => request(`/attendance/employees/${encodeURIComponent(employeeId)}/corrections${qs({ date })}`),
+  addCorrection: (c) => request("/attendance/corrections", { method: "POST", body: JSON.stringify(c) }),
+  withdrawCorrection: (id, reason) =>
+    request(`/attendance/corrections/${id}/withdraw`, { method: "POST", body: JSON.stringify({ reason }) }),
+  mainHall: () => request("/attendance/main-hall"),
+  setMainHall: (cameraIds) => request("/attendance/main-hall", { method: "PUT", body: JSON.stringify({ camera_ids: cameraIds }) }),
+  cameraLocations: () => request("/attendance/cameras/locations"),
+  setCameraLocation: (cameraId, zone) =>
+    request(`/attendance/cameras/${cameraId}/location`, { method: "PUT", body: JSON.stringify({ zone: zone || null }) }),
 };
 export async function markLeave({ employeeId, from, to, reason }) {
   return request("/attendance/leave", {
@@ -1158,3 +1169,20 @@ export const vr = {
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   },
 };
+
+// ---- Zones & areas (backend zones.py, restricted_zones.py) and footfall history.
+export const zonesApi = {
+  list: () => request("/zones"),
+  restricted: () => request("/zones/restricted"),
+  createRestricted: (z) => request("/zones/restricted", { method: "POST", body: JSON.stringify(z) }),
+  updateRestricted: (id, z) => request(`/zones/restricted/${id}`, { method: "PUT", body: JSON.stringify(z) }),
+  deleteRestricted: (id) => request(`/zones/restricted/${id}`, { method: "DELETE" }),
+  restrictedActivity: (id) => request(`/zones/restricted/${id}/activity`),
+};
+// Daily entries / exits for a date range, and one day's hourly arrivals.
+export async function getFootfallHistory(from, to) {
+  return request(`/footfall/history${qs({ from, to })}`);
+}
+export async function getFootfallDay(date) {
+  return request(`/footfall/day${qs({ date })}`);
+}

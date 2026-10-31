@@ -12,6 +12,9 @@ import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval
 // Real unique footfall across every entry gate (backend/app/footfall.py):
 // all gates share one identity gallery, so a person who enters at one gate
 // and leaves or re-enters through another is still counted once.
+// embedded: shown inside Visitor Management's Footfall view, which owns the
+// page title and camera management (add / edit / stop counting), so those
+// controls are left out here.
 
 const REFRESH_MS = 30_000;
 
@@ -26,7 +29,7 @@ function timeLabel(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function Footfall() {
+export default function Footfall({ embedded = false, reloadKey = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [showYesterday, setShowYesterday] = useState(true);
@@ -55,7 +58,7 @@ export default function Footfall() {
       cancelled = true;
       clearVisibleInterval(id);
     };
-  }, [reloadTick]);
+  }, [reloadTick, reloadKey]);
 
   // Free the picture's object URL when it is closed or replaced.
   useEffect(() => {
@@ -116,14 +119,16 @@ export default function Footfall() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Footfall"
-        action={
-          <button onClick={() => setAddOpen(true)} className="btn-primary flex items-center gap-1.5 text-sm">
-            <Plus size={15} /> Add camera
-          </button>
-        }
-      />
+      {!embedded && (
+        <PageHeader
+          title="Footfall"
+          action={
+            <button onClick={() => setAddOpen(true)} className="btn-primary flex items-center gap-1.5 text-sm">
+              <Plus size={15} /> Add camera
+            </button>
+          }
+        />
+      )}
 
       {!data.model_ready && (
         <p className="card px-4 py-3 text-sm text-danger-500">
@@ -226,22 +231,26 @@ export default function Footfall() {
                     <DoorOpen size={14} className="text-slate-400" />
                     <span className="text-ink-900 flex-1">{g.name}</span>
                     {!g.counting && <span className="badge badge-warning">not counting</span>}
-                    {!g.entry_line && (
+                    {!embedded && !g.entry_line && (
                       <button type="button" onClick={() => setEditCameraId(g.camera_id)} className="badge badge-warning" title="Without an entry line everyone in the area is counted, including people outside the gate">
                         draw entry line
                       </button>
                     )}
-                    <button
-                      type="button"
-                      title="Edit gate (entry line and area)"
-                      onClick={() => setEditCameraId(g.camera_id)}
-                      className="text-slate-400 hover:text-ink-900"
-                    >
-                      <Pencil size={13} />
-                    </button>
-                    <button type="button" title="Stop counting at this camera" onClick={() => setRemoving(g)} className="text-slate-400 hover:text-danger-500">
-                      <Trash2 size={13} />
-                    </button>
+                    {!embedded && (
+                      <>
+                        <button
+                          type="button"
+                          title="Edit gate (entry line and area)"
+                          onClick={() => setEditCameraId(g.camera_id)}
+                          className="text-slate-400 hover:text-ink-900"
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <button type="button" title="Stop counting at this camera" onClick={() => setRemoving(g)} className="text-slate-400 hover:text-danger-500">
+                          <Trash2 size={13} />
+                        </button>
+                      </>
+                    )}
                     <span className="font-semibold text-ink-900 w-10 text-right">{g.unique_today}</span>
                   </div>
                   <div className="h-2 rounded-full bg-[#f1f2f7] overflow-hidden">
