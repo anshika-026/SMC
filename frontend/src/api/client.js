@@ -1032,8 +1032,9 @@ export async function fetchCaptureImageUrl(id) {
 export async function getVisitorCameras() {
   return request("/visitors/cameras");
 }
-export async function saveVisitorZone(cameraId, { polygon, enabled }) {
-  return request(`/visitors/zones/${cameraId}`, { method: "PUT", body: JSON.stringify({ polygon, enabled }) });
+// polygon is the area's floor; height (0..1 of the frame, 0 = flat) makes it a 3D box.
+export async function saveVisitorZone(cameraId, { polygon, height = 0, enabled }) {
+  return request(`/visitors/zones/${cameraId}`, { method: "PUT", body: JSON.stringify({ polygon, height, enabled }) });
 }
 export async function clearVisitorZone(cameraId) {
   return request(`/visitors/zones/${cameraId}`, { method: "DELETE" });

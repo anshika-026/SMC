@@ -11,6 +11,12 @@ identities, so this adds no face inference either.
 Zone rule      A person is "in the area" when their FEET (bottom-centre of the box)
                are inside the polygon, as fractions of the frame, so the saved
                area is independent of how the picture is displayed.
+3D area        The polygon is the FLOOR of the area. An optional height (fraction
+               of the frame height, 0 = flat 2D area, which is what areas saved
+               before this existed load as) turns it into a box drawn in
+               perspective on the live video. The height is for drawing only: the
+               zone rule above uses the floor polygon, because feet stand on the
+               floor and a box's height says nothing more about who is inside.
 Visit          Inside on ENTRY_CONFIRM_LOOKS consecutive looks (about 1 s) opens a
                visit. A person who stays inside, and the tracker handing them a new
                id at the same spot (within ABSENCE_GRACE_SECONDS), stay one visit.
@@ -118,10 +124,15 @@ def init_db() -> None:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS visitor_zones (
                    camera_id INTEGER PRIMARY KEY,
-                   polygon TEXT NOT NULL,            -- JSON [[x, y], ...] fractions of the frame
+                   polygon TEXT NOT NULL,            -- JSON [[x, y], ...] fractions of the frame (the floor)
                    enabled INTEGER NOT NULL DEFAULT 1,
-                   updated_at REAL NOT NULL)"""
+                   updated_at REAL NOT NULL,
+                   height REAL NOT NULL DEFAULT 0)   -- 3D box height, fraction of the frame height; 0 = flat"""
         )
+        try:  # areas saved before 3D areas existed stay flat (height 0)
+            conn.execute("ALTER TABLE visitor_zones ADD COLUMN height REAL NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         # TEMPORARY data: removed (row and clip file) once expires_at passes.
         conn.execute(
             """CREATE TABLE IF NOT EXISTS visitor_events (
@@ -211,27 +222,38 @@ def _check_polygon(polygon) -> list[list[float]]:
     return out
 
 
+def _check_height(height) -> float:
+    if not isinstance(height, (int, float)) or not (0 <= height <= 1):
+        raise ValueError("Height must be between 0 and 1 (fraction of the picture height)")
+    return round(float(height), 5)
+
+
+def _zone_dict(row) -> dict:
+    return {"camera_id": row["camera_id"], "polygon": json.loads(row["polygon"]), "height": row["height"] or 0.0,
+            "enabled": bool(row["enabled"]), "updated_at": row["updated_at"]}
+
+
 def get_zone(camera_id: int) -> dict | None:
     with _conn() as conn:
         row = conn.execute("SELECT * FROM visitor_zones WHERE camera_id = ?", (camera_id,)).fetchone()
-    return None if row is None else {"camera_id": row["camera_id"], "polygon": json.loads(row["polygon"]),
-                                      "enabled": bool(row["enabled"]), "updated_at": row["updated_at"]}
+    return None if row is None else _zone_dict(row)
 
 
 def list_zones() -> list[dict]:
     with _conn() as conn:
         rows = conn.execute("SELECT * FROM visitor_zones").fetchall()
-    return [{"camera_id": r["camera_id"], "polygon": json.loads(r["polygon"]), "enabled": bool(r["enabled"]),
-             "updated_at": r["updated_at"]} for r in rows]
+    return [_zone_dict(r) for r in rows]
 
 
-def save_zone(camera_id: int, polygon, enabled: bool = True) -> dict:
+def save_zone(camera_id: int, polygon, enabled: bool = True, height: float = 0.0) -> dict:
     polygon = _check_polygon(polygon)
+    height = _check_height(height)
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO visitor_zones (camera_id, polygon, enabled, updated_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(camera_id) DO UPDATE SET polygon = excluded.polygon, enabled = excluded.enabled, updated_at = excluded.updated_at",
-            (camera_id, json.dumps(polygon), 1 if enabled else 0, time.time()),
+            "INSERT INTO visitor_zones (camera_id, polygon, enabled, updated_at, height) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(camera_id) DO UPDATE SET polygon = excluded.polygon, enabled = excluded.enabled, "
+            "updated_at = excluded.updated_at, height = excluded.height",
+            (camera_id, json.dumps(polygon), 1 if enabled else 0, time.time(), height),
         )
     service.refresh()
     return get_zone(camera_id)

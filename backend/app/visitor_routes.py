@@ -5,7 +5,8 @@ Visitor Management API (admin only; see visitors.py for the rules).
 
   GET    /api/visitors/cameras                  every camera: online?, saved area, detection active?
   GET    /api/visitors/cameras/{id}/frame       a still from the camera (to check an area against)
-  PUT    /api/visitors/zones/{id}               save the area {polygon: [[x, y], ...], enabled}
+  PUT    /api/visitors/zones/{id}               save the area {polygon: [[x, y], ...], enabled, height}
+                                                 (polygon = floor; height 0..1 of the frame, 0 = flat; omitted = 0)
   DELETE /api/visitors/zones/{id}               clear the area (stops detection on that camera)
   GET    /api/visitors/events                   newest first; ?camera_id= &after_id= &limit=
   GET    /api/visitors/events/{id}              one event
@@ -54,16 +55,17 @@ def camera_frame(camera_id: int):
 class ZoneIn(BaseModel):
     polygon: list[list[float]]
     enabled: bool = True
+    height: float = 0.0   # 3D box height (fraction of the frame height); 0 = flat 2D area
 
 
 @router.put("/zones/{camera_id}")
 def save_zone(camera_id: int, body: ZoneIn, principal: dict = Depends(auth.require_admin)):
     cam = _camera(camera_id)
     try:
-        zone = visitors.save_zone(camera_id, body.polygon, body.enabled)
+        zone = visitors.save_zone(camera_id, body.polygon, body.enabled, body.height)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    audit.record("visitors.zone_save", principal, target=f"camera:{camera_id}", points=len(body.polygon), enabled=body.enabled, camera=cam["name"])
+    audit.record("visitors.zone_save", principal, target=f"camera:{camera_id}", points=len(body.polygon), height=body.height, enabled=body.enabled, camera=cam["name"])
     return {"zone": zone, **visitors.service.camera_status(camera_id)}
 
 
