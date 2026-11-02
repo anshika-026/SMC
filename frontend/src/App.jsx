@@ -5,10 +5,11 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import AdminRoute from "./components/AdminRoute";
 import ErrorBoundary from "./components/ErrorBoundary";
 import AppShell from "./layouts/AppShell";
-import { featureOn } from "./lib/features";
+import { featureOn, licenseOn } from "./lib/features";
 
 import Login from "./pages/Login";
 import ClientLogin from "./pages/ClientLogin";
+import Sso from "./pages/Sso";
 
 // Pages load on demand: the app used to ship every page (and the charting
 // library) in one ~850 kB bundle before the login screen could render.
@@ -49,10 +50,11 @@ function Page({ children }) {
   );
 }
 
-// A page for an AI feature this deployment doesn't offer (lib/features.js)
-// redirects to the dashboard instead of rendering.
-function Feature({ name, children }) {
-  return featureOn(name) ? children : <Navigate to="/dashboard" replace />;
+// A page for an AI feature this deployment doesn't offer, or that the Master
+// Portal license doesn't include (`license`, lib/features.js), redirects to
+// the dashboard instead of rendering. The backend refuses its API either way.
+function Feature({ name, license, children }) {
+  return featureOn(name) && licenseOn(license) ? children : <Navigate to="/dashboard" replace />;
 }
 
 export default function App() {
@@ -66,12 +68,14 @@ export default function App() {
               backend/app/license_routes.py's public_company_by_slug and
               the report's production-deployment notes for real subdomains. */}
           <Route path="/client/:slug/login" element={<ClientLogin />} />
+          {/* Arrival from the Deco Vision Master Portal sign-in (launch token in the #fragment). */}
+          <Route path="/sso" element={<Sso />} />
           {/* No self-signup: admin accounts are created by an operator
               (python -m app.manage create-admin), clients by an admin. */}
           <Route
             path="/face-training"
             element={
-              <Feature name="face_recognition">
+              <Feature name="face_recognition" license="face_training">
                 <AdminRoute>
                   <Page>
                     <FaceTraining />
@@ -94,7 +98,7 @@ export default function App() {
             <Route path="/alerts" element={<Page><Alerts /></Page>} />
             <Route path="/people" element={<Feature name="face_recognition"><Page><People /></Page></Feature>} />
             <Route path="/face-recognition" element={<Feature name="face_recognition"><Page><FaceRecognition /></Page></Feature>} />
-            <Route path="/attendance" element={<Feature name="face_recognition"><Page><Attendance /></Page></Feature>} />
+            <Route path="/attendance" element={<Feature name="face_recognition" license="attendance"><Page><Attendance /></Page></Feature>} />
             <Route path="/staff" element={<Feature name="staff_count"><Page><StaffCount /></Page></Feature>} />
             <Route path="/workforce" element={<Feature name="desk_analytics"><Page><Workforce /></Page></Feature>} />
             <Route path="/visitors" element={<Feature name="visitors"><Page><VisitorManagement /></Page></Feature>} />

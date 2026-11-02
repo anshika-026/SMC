@@ -1,8 +1,19 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
+import { setLicensedFeatures } from "../lib/features";
 
 const AuthContext = createContext(null);
+
+// The Master Portal license (backend/app/master_link.py summary) decides which
+// pages show; "standalone" (or no info yet) hides nothing.
+function applyLicense(license) {
+  setLicensedFeatures(license?.mode === "master" ? license.features || [] : null);
+}
+
+// How often the signed-in operator's license is re-read (/api/auth/me), so a
+// feature the Master Portal turns off or on reaches an open tab.
+const LICENSE_REFRESH_MS = 60000;
 
 // How often an already-logged-in client's session is re-checked against
 // the live license (backend/app/license_routes.py's /client-me, which
@@ -17,7 +28,9 @@ const CLIENT_SESSION_REFRESH_MS = 60000;
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem("deco_user");
-    return saved ? JSON.parse(saved) : null;
+    const parsed = saved ? JSON.parse(saved) : null;
+    applyLicense(parsed?.license);   // before the first render, so a refresh never flashes hidden pages
+    return parsed;
   });
   const userRef = useRef(user);
   userRef.current = user;
@@ -62,15 +75,40 @@ export function AuthProvider({ children }) {
     return clientUser;
   }, []);
 
+  // Arrival from the Deco Vision Master Portal (pages/Sso.jsx): the launch
+  // token becomes an SMC session, stored exactly like a normal login so every
+  // page, refresh and websocket works the same way.
+  const loginWithSso = useCallback(async (launchToken) => {
+    const res = await api.ssoExchange(launchToken);
+    const ssoUser = {
+      role: "admin",
+      sso: true,
+      name: res.name || res.username,
+      username: res.username,
+      email: "",
+      license: res.license,
+      loginUrl: res.license?.login_url || "",
+    };
+    localStorage.setItem("deco_token", res.token);
+    localStorage.setItem("deco_user", JSON.stringify(ssoUser));
+    applyLicense(res.license);
+    setUser(ssoUser);
+    return ssoUser;
+  }, []);
+
   const logout = useCallback(() => {
     // Best-effort server-side revoke — the local session clears either
     // way, but this stops the token from working if it leaked (e.g. was
     // logged, or the tab is shared) rather than just forgetting it here.
-    if (userRef.current?.role === "client") api.clientLogout();
-    else if (userRef.current) api.logoutAdmin();
+    const current = userRef.current;
+    const done = current?.role === "client" ? api.clientLogout() : current ? api.logoutAdmin() : Promise.resolve();
     localStorage.removeItem("deco_token");
     localStorage.removeItem("deco_user");
+    applyLicense(null);
     setUser(null);
+    // A client who came from the Master Portal goes back to its sign-in page
+    // (after the revoke has been sent, so the session really ends).
+    if (current?.sso && current.loginUrl) Promise.resolve(done).finally(() => window.location.assign(current.loginUrl));
   }, []);
 
   // Merges profile edits (Settings > Profile) into the logged-in user so the
@@ -105,8 +143,34 @@ export function AuthProvider({ children }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-arm when switching between client/non-client, not on every user-field change
   }, [user?.role]);
 
+  // Operator sessions (local admin or Master Portal sign-in): keep the license
+  // summary current. A 401 here (license suspended, session ended) is handled
+  // by client.js, which clears the session and goes back to sign-in.
+  const loggedIn = !!user && user.role !== "client";
+  useEffect(() => {
+    if (!loggedIn) return undefined;
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const me = await api.getMe();
+        if (cancelled) return;
+        applyLicense(me.license);
+        updateUser({ license: me.license, ...(me.sso ? { loginUrl: me.license?.login_url || "" } : {}) });
+      } catch {
+        // offline / 401 already handled
+      }
+    }
+    refresh();
+    const interval = setVisibleInterval(refresh, LICENSE_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearVisibleInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-arm only on sign-in/out
+  }, [loggedIn]);
+
   return (
-    <AuthContext.Provider value={{ user, login, loginAsClient, logout, updateUser }}>
+    <AuthContext.Provider value={{ user, login, loginAsClient, loginWithSso, logout, updateUser }}>
       {children}
     </AuthContext.Provider>
   );

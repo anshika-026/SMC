@@ -15,6 +15,11 @@ os.environ["LOG_TO_FILE"] = "false"
 # Full product under test; tests that need a restricted deployment patch
 # config.ENABLED_FEATURES themselves.
 os.environ["ENABLED_FEATURES"] = ""
+# Not connected to the Master Portal, whatever a local backend/.env says;
+# tests/test_master_link.py switches the connection on per test.
+os.environ["INTEGRATION_MODE"] = "standalone"
+for _name in ("MASTER_PORTAL_URL", "MASTER_PORTAL_LOGIN_URL", "MASTER_LICENSE_ID", "MASTER_APP_API_KEY", "MASTER_PORTAL_PUBLIC_KEY"):
+    os.environ[_name] = ""
 os.environ.pop("ADMIN_EMAIL", None)
 os.environ.pop("ADMIN_PASSWORD", None)
 
@@ -23,7 +28,7 @@ import pytest  # noqa: E402
 # Every module that keeps its own module-level DB_PATH.
 _DB_MODULES = (
     "app.alerts", "app.analytics_settings", "app.attendance", "app.audit", "app.auth", "app.camera_db",
-    "app.desk_db", "app.face_db", "app.insights", "app.license_db",
+    "app.desk_db", "app.face_db", "app.insights", "app.license_db", "app.master_link",
     "app.reid.peopleid_db", "app.reid.reid_db", "app.staff.occupancy",
 )
 
@@ -42,13 +47,14 @@ def isolated_db(tmp_path, monkeypatch):
         mod = importlib.import_module(name)
         monkeypatch.setattr(mod, "DB_PATH", db_file)
 
-    from app import analytics_settings, audit, auth, camera_db, face_db, license_db
+    from app import analytics_settings, audit, auth, camera_db, face_db, license_db, master_link
     from app.staff import occupancy
 
     camera_db.init_db()
     analytics_settings.init_db()
     face_db.init_face_tables()
     license_db.init_db()
+    master_link.init_db()
     auth.init_db()
     audit.init_db()
     occupancy.init_db()

@@ -19,9 +19,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app import auth, employee_directory, restricted_zones, zones
+from app import auth, employee_directory, master_link, restricted_zones, zones
 
 router = APIRouter(prefix="/api/zones", tags=["zones"], dependencies=[Depends(auth.require_admin)])
+# Restricted areas are their own licensed feature (Master Portal "intrusion_detection").
+_restricted_licensed = Depends(master_link.require("intrusion_detection"))
 
 
 @router.get("")
@@ -29,7 +31,7 @@ def all_zones():
     return zones.list_all()
 
 
-@router.get("/restricted")
+@router.get("/restricted", dependencies=[_restricted_licensed])
 def restricted_list():
     return {"zones": restricted_zones.list_zones(), "rules": restricted_zones.RULES, "severities": list(restricted_zones.SEVERITIES)}
 
@@ -44,7 +46,7 @@ class RestrictedIn(BaseModel):
     enabled: bool | None = None
 
 
-@router.post("/restricted", status_code=201)
+@router.post("/restricted", status_code=201, dependencies=[_restricted_licensed])
 def restricted_create(body: RestrictedIn, principal: dict = Depends(auth.require_admin)):
     if body.camera_id is None:
         raise HTTPException(status_code=422, detail="Choose a camera.")
@@ -56,7 +58,7 @@ def restricted_create(body: RestrictedIn, principal: dict = Depends(auth.require
         raise HTTPException(status_code=422, detail=str(e))
 
 
-@router.put("/restricted/{zone_id}")
+@router.put("/restricted/{zone_id}", dependencies=[_restricted_licensed])
 def restricted_update(zone_id: int, body: RestrictedIn, principal: dict = Depends(auth.require_admin)):
     try:
         return restricted_zones.update_zone(zone_id, body.model_dump(exclude={"camera_id"}), principal)
@@ -66,14 +68,14 @@ def restricted_update(zone_id: int, body: RestrictedIn, principal: dict = Depend
         raise HTTPException(status_code=422, detail=str(e))
 
 
-@router.delete("/restricted/{zone_id}")
+@router.delete("/restricted/{zone_id}", dependencies=[_restricted_licensed])
 def restricted_delete(zone_id: int, principal: dict = Depends(auth.require_admin)):
     if not restricted_zones.delete_zone(zone_id, principal):
         raise HTTPException(status_code=404, detail="Zone not found")
     return {"ok": True}
 
 
-@router.get("/restricted/{zone_id}/activity")
+@router.get("/restricted/{zone_id}/activity", dependencies=[_restricted_licensed])
 def restricted_activity(zone_id: int, limit: int = Query(100, ge=1, le=500)):
     rows = restricted_zones.activity(zone_id, limit=limit)
     for r in rows:

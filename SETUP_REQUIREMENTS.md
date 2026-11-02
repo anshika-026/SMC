@@ -193,7 +193,41 @@ Running the tests also needs `pip install -r requirements-dev.txt`, then
 | Start the web app | `cd frontend; npm run dev` |
 | Back up the database | `docker run --rm -v smc_data:/data -v "${PWD}\backup:/out" alpine cp -a /data/. /out/` |
 
-## 9. Never commit
+## 9. Connecting SMC to the Deco Vision Master Portal (optional)
+
+By default SMC runs on its own (`INTEGRATION_MODE=standalone`). Connected, its
+clients sign in on the Master Portal (MAINDV) client login, are sent to SMC's
+`/sso` page with a signed one-minute token, and land on the SMC dashboard. The
+license in the Master Portal then controls access (active / suspended /
+expired), the camera limit and the features (face recognition, attendance,
+face model training, visitor management, footfall, workforce analytics,
+restricted areas). Turning a feature off blocks it in SMC; nothing is deleted.
+
+1. **Master Portal server** (once): `python -m app.manage generate-sso-key`.
+   It prints the public key. Keep the key file secret.
+2. **Master Portal → License Management**: on the SMC license, click the
+   **Application** button, choose **SMC application**, enter SMC's address
+   (for example `https://smc.example.com`), Save, then **Generate key**.
+   The dialog also shows the license ID.
+3. **SMC `backend/.env`** (see `backend/.env.example` for all of them):
+
+   | Setting | Value |
+   |---|---|
+   | `INTEGRATION_MODE` | `master` |
+   | `MASTER_PORTAL_URL` | the portal API address SMC's server can reach, e.g. `https://vision.dewin.in` |
+   | `MASTER_PORTAL_LOGIN_URL` | the client login page, e.g. `https://vision.dewin.in/client/smc/login` |
+   | `MASTER_LICENSE_ID` | from step 2 |
+   | `MASTER_APP_API_KEY` | from step 2 (secret) |
+   | `MASTER_PORTAL_PUBLIC_KEY` | from step 1 |
+
+4. `docker compose up -d --build backend`. Clients now open the Master Portal
+   login page. The local admin login on SMC's `/login` keeps working.
+
+If the Master Portal can't be reached, SMC keeps using the last license it read
+for `ENTITLEMENT_GRACE_HOURS` (24 h), then locks until it is reachable again.
+Set `INTEGRATION_MODE=standalone` and restart to disconnect.
+
+## 10. Never commit
 
 `.env` files, `backend/data/`, the Docker volume contents, and the model weights.
 They hold secrets, the database, and photos of real people. `.gitignore` already

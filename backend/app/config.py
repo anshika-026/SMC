@@ -184,6 +184,30 @@ MAX_UPLOAD_BYTES = _int("MAX_UPLOAD_MB", 5) * 1024 * 1024
 IDENTITY_SERVICE_BASE = _str("IDENTITY_SERVICE_BASE").rstrip("/")
 EXTERNAL_HTTP_TIMEOUT = _float("EXTERNAL_HTTP_TIMEOUT", 15.0)
 
+# --- Deco Vision Master Portal (master_link.py) -------------------------------------
+# "standalone" (default): SMC works exactly as before, nothing below is used.
+# "master": clients sign in on the Master Portal and arrive with a signed launch
+# token; the license there decides access, camera limit and features.
+INTEGRATION_MODE = _str("INTEGRATION_MODE", "standalone").lower()
+# Server-to-server address of the Master Portal API (from inside Docker on a
+# laptop that is http://host.docker.internal:8821, in production https://...).
+MASTER_PORTAL_URL = _str("MASTER_PORTAL_URL").rstrip("/")
+# Where a browser signs in (the license's client login page). Logout and an
+# expired session go back here.
+MASTER_PORTAL_LOGIN_URL = _str("MASTER_PORTAL_LOGIN_URL")
+# The license this deployment belongs to; a launch token for any other license
+# is refused.
+MASTER_LICENSE_ID = _str("MASTER_LICENSE_ID")
+# The license's application key (secret; the Master Portal shows it once).
+MASTER_APP_API_KEY = os.environ.get("MASTER_APP_API_KEY", "")
+# The Master Portal's PUBLIC signing key: base64 of the raw Ed25519 key (one
+# line), or a PEM. Pinned here on purpose, never fetched at runtime.
+MASTER_PORTAL_PUBLIC_KEY = os.environ.get("MASTER_PORTAL_PUBLIC_KEY", "").replace("\\n", "\n").strip()
+ENTITLEMENT_REFRESH_SECONDS = _float("ENTITLEMENT_REFRESH_SECONDS", 60.0)
+# If the Master Portal can't be reached, keep using the last license read for
+# this long, then lock until it is reachable again.
+ENTITLEMENT_GRACE_HOURS = _float("ENTITLEMENT_GRACE_HOURS", 24.0)
+
 # --- Retention (retention.py) -------------------------------------------------------
 # Master switch for the hourly cleanup (expired sessions are always purged).
 RETENTION_ENABLED = _bool("RETENTION_ENABLED", True)
@@ -231,6 +255,14 @@ def validate() -> list[str]:
             problems.append("IDENTITY_SERVICE_BASE must use https:// in production")
         if any(o.startswith("http://") and "localhost" not in o and "127.0.0.1" not in o for o in CORS_ORIGINS):
             problems.append("CORS_ORIGINS must use https:// origins in production")
+    if INTEGRATION_MODE not in ("standalone", "master"):
+        problems.append(f"INTEGRATION_MODE must be standalone or master (got {INTEGRATION_MODE!r})")
+    if INTEGRATION_MODE == "master":
+        for name in ("MASTER_PORTAL_URL", "MASTER_PORTAL_LOGIN_URL", "MASTER_LICENSE_ID", "MASTER_APP_API_KEY", "MASTER_PORTAL_PUBLIC_KEY"):
+            if not globals()[name]:
+                problems.append(f"{name} must be set when INTEGRATION_MODE=master")
+        if IS_PRODUCTION and MASTER_PORTAL_URL.startswith("http://"):
+            problems.append("MASTER_PORTAL_URL must use https:// in production")
     if PASSWORD_MIN_LENGTH < 8:
         problems.append("PASSWORD_MIN_LENGTH must be at least 8")
     if RTSP_RECONNECT_DELAY <= 0 or RTSP_RECONNECT_MAX_DELAY < RTSP_RECONNECT_DELAY:

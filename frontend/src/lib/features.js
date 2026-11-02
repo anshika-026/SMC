@@ -21,7 +21,32 @@ const ENABLED = new Set(
     .filter(Boolean)
 );
 
+// When SMC is connected to the Deco Vision Master Portal, the license's
+// features (Master Portal keys, from /api/auth/me) also decide what shows.
+// null = not connected: nothing extra is hidden. The backend enforces the
+// same rules (backend/app/master_link.py); this only keeps the menus honest.
+let LICENSED = null;
+export function setLicensedFeatures(keys) {
+  LICENSED = Array.isArray(keys) ? new Set(keys) : null;
+}
+
+// Processing switch -> the license feature it needs (master_link.ANALYTICS_LICENSE_FEATURE).
+const SWITCH_LICENSE = {
+  face_recognition: "face_recognition",
+  appearance_handoff: "face_recognition",
+  desk_analytics: "workforce_analytics",
+  footfall: "footfall_analytics",
+  visitors: "visitor_management",
+  staff_count: "attendance",
+};
+
+// Does the Master Portal license include this feature (its own key, e.g.
+// "attendance", "face_training")? Always true when not connected.
+export function licenseOn(key) {
+  return !key || LICENSED === null || LICENSED.has(key);
+}
+
 export function featureOn(key) {
   if (!key || !AI_FEATURES.has(key)) return true;
-  return ENABLED.size === 0 || ENABLED.has(key);
+  return (ENABLED.size === 0 || ENABLED.has(key)) && licenseOn(SWITCH_LICENSE[key]);
 }

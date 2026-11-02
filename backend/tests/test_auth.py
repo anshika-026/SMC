@@ -11,7 +11,8 @@ from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD, bearer
 def test_valid_login_returns_a_working_session(api, admin_token):
     r = api.get("/api/auth/me", headers=bearer(admin_token))
     assert r.status_code == 200
-    assert r.json() == {"email": ADMIN_EMAIL, "name": "Admin"}
+    # `license` is the Master Portal connection (standalone unless configured).
+    assert r.json() == {"email": ADMIN_EMAIL, "name": "Admin", "sso": False, "license": {"mode": "standalone"}}
 
 
 def test_email_is_case_insensitive(api, admin_token):

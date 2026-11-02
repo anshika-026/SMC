@@ -43,7 +43,7 @@ from datetime import datetime
 
 import psutil
 
-from app import face_db
+from app import face_db, master_link
 from app.face_training import train_classifier
 from app import lifecycle
 
@@ -153,8 +153,8 @@ def _check_once() -> None:
     with _lock:
         enabled = _state["enabled"]
         _state["last_check_at"] = time.time()
-    if not enabled:
-        return
+    if not enabled or not master_link.feature_allowed("face_training"):
+        return   # off, or model training isn't in the SMC license (existing models stay)
 
     last_run = _last_run()
     last_trained_at = last_run["trained_at"] if last_run else 0.0

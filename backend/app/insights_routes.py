@@ -10,7 +10,7 @@ import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app import auth, insights
+from app import auth, insights, master_link
 
 router = APIRouter(prefix="/api", tags=["insights"])
 
@@ -27,7 +27,7 @@ def dashboard_summary(date: str | None = None, _: dict = Depends(auth.require_ad
     return {**insights.dashboard_summary(), "business": insights.business_overview(date)}
 
 
-@router.get("/workforce/overview")
+@router.get("/workforce/overview", dependencies=[Depends(master_link.require("workforce_analytics"))])
 def workforce_overview(date: str | None = None, _: dict = Depends(auth.require_admin)):
     if date:
         try:

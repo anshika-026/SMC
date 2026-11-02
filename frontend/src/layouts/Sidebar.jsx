@@ -18,7 +18,7 @@ import * as api from "../api/client";
 import Avatar from "../components/Avatar";
 import BrandLogo from "../components/BrandLogo";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
-import { featureOn } from "../lib/features";
+import { featureOn, licenseOn } from "../lib/features";
 
 // `requiresFeature` gates a nav item for a client login (user.role ===
 // "client", see AuthContext.loginAsClient) to only what their license has
@@ -49,7 +49,7 @@ const NAV_SECTIONS = [
       { to: "/workforce", label: "Workforce Insights", icon: TrendingUp, requiresFeature: "workforce_analytics", analytics: "desk_analytics" },
       { to: "/face-recognition", label: "Face Recognition", icon: ScanFace, requiresFeature: "attendance", analytics: "face_recognition" },
       // Attendance is built from face recognition sightings (backend/app/attendance.py).
-      { to: "/attendance", label: "Attendance", icon: CalendarCheck, requiresFeature: "attendance", analytics: "face_recognition" },
+      { to: "/attendance", label: "Attendance", icon: CalendarCheck, requiresFeature: "attendance", analytics: "face_recognition", license: "attendance" },
       { to: "/visitors", label: "Visitor Management", icon: Contact, requiresFeature: "footfall_analytics", analytics: "visitors" },
     ],
   },
@@ -82,6 +82,7 @@ export default function Sidebar() {
       items: s.items.filter(
         (item) =>
           featureOn(item.analytics) &&
+          licenseOn(item.license) &&
           !(isClient && item.adminOnly) &&
           (!isClient || !item.requiresFeature || (user.allowedFeatures || []).includes(item.requiresFeature))
       ),

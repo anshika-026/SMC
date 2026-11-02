@@ -27,7 +27,7 @@ decoded while someone is watching it.
 import json
 import threading
 import time
-from app import config, db
+from app import config, db, master_link
 
 DB_PATH = config.DB_PATH
 
@@ -74,8 +74,9 @@ def available(feature: str) -> bool:
 
 def enabled(feature: str) -> bool:
     """Fast in-memory check, safe to call per frame. A feature whose
-    dependency is off, or that this deployment doesn't offer, counts as off."""
-    if not available(feature) or not _state.get(feature, True):
+    dependency is off, that this deployment doesn't offer, or that the
+    Master Portal license doesn't include (master_link.py), counts as off."""
+    if not available(feature) or not _state.get(feature, True) or not master_link.analytics_allowed(feature):
         return False
     dep = DEPENDS_ON.get(feature)
     return enabled(dep) if dep else True
@@ -96,7 +97,8 @@ def set_enabled(feature: str, on: bool) -> None:
 
 def snapshot() -> dict:
     return {
-        k: {"label": label, "on": _state[k], "effective": enabled(k), "requires": DEPENDS_ON.get(k)}
+        k: {"label": label, "on": _state[k], "effective": enabled(k), "requires": DEPENDS_ON.get(k),
+            "licensed": master_link.analytics_allowed(k)}
         for k, label in FEATURES.items()
         if available(k)
     }

@@ -15,7 +15,7 @@ import sqlite3
 import time
 
 from app import attendance, camera_db, camera_stream, employee_directory
-from app import analytics_settings, config, db
+from app import analytics_settings, config, db, master_link
 
 log = logging.getLogger("insights")
 
@@ -119,9 +119,10 @@ def dashboard_summary(now: float | None = None) -> dict:
     ff = footfall.service.summary()
     desk_rows = desks.service.report(_iso(day))["employees"] if desks.service.tracker else []
 
-    # Only report on analytics this deployment runs (config.ENABLED_FEATURES).
-    face_on = analytics_settings.available("face_recognition")
-    footfall_on = analytics_settings.available("footfall")
+    # Only report on analytics this deployment runs (config.ENABLED_FEATURES)
+    # and the Master Portal license includes (always, in standalone mode).
+    face_on = analytics_settings.available("face_recognition") and master_link.feature_allowed("face_recognition")
+    footfall_on = analytics_settings.available("footfall") and master_link.feature_allowed("footfall_analytics")
 
     attention = []
     for c in cams:
@@ -220,10 +221,12 @@ def business_overview(day: str | None = None, now: float | None = None) -> dict:
     # "now" for a past date is the end of that day, so its numbers are complete.
     at = now if is_today else day_end - 1
 
-    face_on = analytics_settings.available("face_recognition")
-    footfall_on = analytics_settings.available("footfall")
-    visitors_on = analytics_settings.available("visitors")
-    staff_on = analytics_settings.available("staff_count")
+    # Offered by this deployment AND included in the Master Portal license
+    # (always true in standalone mode); a section that isn't is None.
+    face_on = analytics_settings.available("face_recognition") and master_link.feature_allowed("attendance")
+    footfall_on = analytics_settings.available("footfall") and master_link.feature_allowed("footfall_analytics")
+    visitors_on = analytics_settings.available("visitors") and master_link.feature_allowed("visitor_management")
+    staff_on = analytics_settings.available("staff_count") and master_link.feature_allowed("attendance")
 
     # ---- 1. workforce (the Attendance page's classification) --------------------------
     workforce_block = None

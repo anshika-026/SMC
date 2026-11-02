@@ -35,7 +35,7 @@ import time
 import cv2
 import numpy as np
 
-from app import alerts, audit, camera_db, config, db, lifecycle, person_detection, resilience
+from app import alerts, audit, camera_db, config, db, lifecycle, master_link, person_detection, resilience
 from app.desk_tracker import in_polygon
 
 log = logging.getLogger("restricted_zones")
@@ -270,6 +270,8 @@ class RestrictedZoneService:
         return h
 
     def wants(self, camera_id: int) -> float:
+        if not master_link.feature_allowed("intrusion_detection"):
+            return 0.0   # not in the SMC license: zones are kept, not watched
         return DETECT_FPS if self._zones.get(camera_id) and self.health(camera_id).allow() else 0.0
 
     def deliver(self, camera_id: int, frame: np.ndarray, people: list[dict], ts: float) -> None:

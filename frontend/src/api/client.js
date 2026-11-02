@@ -37,17 +37,18 @@ export const WS_PROTOCOL = API_URL.protocol === "https:" ? "wss" : "ws";
 function handleAuthFailure() {
   const hadToken = !!localStorage.getItem("deco_token");
   if (!hadToken) return;
-  let wasClient = false;
+  let saved = null;
   try {
-    wasClient = JSON.parse(localStorage.getItem("deco_user") || "null")?.role === "client";
+    saved = JSON.parse(localStorage.getItem("deco_user") || "null");
   } catch {
-    // corrupt localStorage — fall through with wasClient=false
+    // corrupt localStorage — fall through to the plain login page
   }
   localStorage.removeItem("deco_token");
   localStorage.removeItem("deco_user");
   const path = window.location.pathname;
-  if (!path.startsWith("/login") && !path.startsWith("/client-login") && !path.startsWith("/client/")) {
-    window.location.href = wasClient ? "/client-login" : "/login";
+  if (!path.startsWith("/login") && !path.startsWith("/client-login") && !path.startsWith("/client/") && !path.startsWith("/sso")) {
+    // A client who came from the Master Portal signs in there again.
+    window.location.href = saved?.sso && saved?.loginUrl ? saved.loginUrl : saved?.role === "client" ? "/client-login" : "/login";
   }
 }
 
@@ -94,6 +95,31 @@ export async function login(email, password) {
   }
   const data = await res.json();
   return { token: data.token, user: { role: "admin", name: data.name, email: data.email } };
+}
+// Sign-in from the Deco Vision Master Portal (backend/app/sso_routes.py): the
+// one-minute launch token from the /sso#token=... link, exchanged once for an
+// SMC session.
+export async function ssoExchange(token) {
+  const res = await fetch(`${BASE_URL}/auth/sso`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(typeof body?.detail === "string" ? body.detail : "Couldn't sign you in. Please try again.");
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+// Public: is this SMC connected to the Master Portal, and where clients sign in.
+export function getSsoConfig() {
+  return fetch(`${BASE_URL}/auth/sso/config`).then((r) => (r.ok ? r.json() : { mode: "standalone" }));
+}
+// The signed-in operator plus the Master Portal license summary.
+export function getMe() {
+  return request("/auth/me");
 }
 export async function logoutAdmin() {
   try {

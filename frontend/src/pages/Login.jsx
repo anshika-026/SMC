@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import AuthLayout from "../layouts/AuthLayout";
 import PasswordField from "../components/PasswordField";
 import { useAuth } from "../context/AuthContext";
+import * as api from "../api/client";
 
 export default function Login() {
   const { login } = useAuth();
@@ -11,6 +12,11 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [masterLoginUrl, setMasterLoginUrl] = useState("");
+
+  useEffect(() => {
+    api.getSsoConfig().then((c) => setMasterLoginUrl(c.mode === "master" ? c.login_url || "" : "")).catch(() => {});
+  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -63,12 +69,19 @@ export default function Login() {
         </button>
       </form>
 
-      <p className="text-sm text-slate-500 text-center mt-6">
-        Client portal login?{" "}
-        <Link to="/client-login" className="text-brand-600 font-medium">
-          Log in here
-        </Link>
-      </p>
+      {masterLoginUrl ? (
+        // Connected to the Deco Vision Master Portal: clients sign in there.
+        <a href={masterLoginUrl} className="btn-secondary w-full mt-4 inline-flex justify-center">
+          Sign in with Deco Vision
+        </a>
+      ) : (
+        <p className="text-sm text-slate-500 text-center mt-6">
+          Client portal login?{" "}
+          <Link to="/client-login" className="text-brand-600 font-medium">
+            Log in here
+          </Link>
+        </p>
+      )}
     </AuthLayout>
   );
 }

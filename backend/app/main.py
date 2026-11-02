@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
 from typing import Literal
 
@@ -59,6 +60,7 @@ from .staff import routes as staff_routes  # noqa: E402
 from .staff.service import service as staff_service  # noqa: E402
 from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, ingest, license_routes, rtsp_reader, stream_source, restricted_zones, visitor_registry, visitor_registry_routes, visitor_routes, visitors, zone_routes  # noqa: E402
 from . import health_routes, heap, lifecycle, person_detection, retention  # noqa: E402
+from . import master_link, sso_routes  # noqa: E402
 from .ratelimit import SlidingWindowLimiter  # noqa: E402
 
 log = logging.getLogger("main")
@@ -138,21 +140,28 @@ async def _unhandled(request: Request, exc: Exception):
     log.exception("unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
-app.include_router(face_routes.router)
-app.include_router(face_training_routes.router)
-app.include_router(capture_review_routes.router)
+def _licensed(feature: str) -> list:
+    """Router dependency: the Master Portal license must include `feature`
+    (always passes when INTEGRATION_MODE=standalone; see master_link.py)."""
+    return [Depends(master_link.require(feature))]
+
+
+app.include_router(face_routes.router, dependencies=_licensed("face_recognition"))
+app.include_router(face_training_routes.router, dependencies=_licensed("face_training"))
+app.include_router(capture_review_routes.router, dependencies=_licensed("face_recognition"))
 app.include_router(license_routes.router)
-app.include_router(footfall_routes.router)
-app.include_router(attendance_routes.router)
-app.include_router(desk_routes.router)
-app.include_router(insights_routes.router)
+app.include_router(footfall_routes.router, dependencies=_licensed("footfall_analytics"))
+app.include_router(attendance_routes.router, dependencies=_licensed("attendance"))
+app.include_router(desk_routes.router)       # desk analytics gated per route in desk_routes (camera stills aren't)
+app.include_router(insights_routes.router)   # dashboard: always; workforce overview gated in insights_routes
 app.include_router(alerts_routes.router)
 app.include_router(analytics_routes.router)
-app.include_router(visitor_routes.router)
-app.include_router(visitor_registry_routes.router)
-app.include_router(zone_routes.router)
-app.include_router(staff_routes.router)
+app.include_router(visitor_routes.router, dependencies=_licensed("visitor_management"))
+app.include_router(visitor_registry_routes.router, dependencies=_licensed("visitor_management"))
+app.include_router(zone_routes.router)       # restricted areas gated per route in zone_routes
+app.include_router(staff_routes.router, dependencies=_licensed("attendance"))
 app.include_router(health_routes.router)
+app.include_router(sso_routes.router)
 staff_routes.register_websockets(app)
 
 
@@ -190,6 +199,7 @@ def init_databases() -> None:
     analytics_settings.init_db()
     face_db.init_face_tables()
     license_db.init_db()
+    master_link.init_db()
     auth.init_db()
     audit.init_db()
     auth.bootstrap_admin_from_env()
@@ -216,6 +226,8 @@ def start_services() -> None:
     # session was running before a restart (if its planned end time hasn't
     # already passed) — see face_collection.py for why this can never
     # create a duplicate worker per camera.
+    # Master Portal license refresher (no-op unless INTEGRATION_MODE=master).
+    master_link.ensure_started()
     face_collection.ensure_expiry_watcher_started()
     face_collection.resume_if_needed()
     # Periodic background retraining trigger (new labeled samples
@@ -361,6 +373,15 @@ def list_cameras(principal: dict = Depends(auth.get_principal)):
     return cameras
 
 
+_camera_limit_lock = threading.Lock()
+
+
+def _report_cameras_soon() -> None:
+    """Tell the Master Portal about a camera change without holding up the request."""
+    if master_link.enabled():
+        threading.Thread(target=master_link.report_cameras, name="master-camera-report", daemon=True).start()
+
+
 @app.post("/api/cameras")
 def create_camera(payload: CameraIn, principal: dict = Depends(auth.require_admin)):
     fields = payload.model_dump(exclude={"name", "site"})
@@ -370,7 +391,18 @@ def create_camera(payload: CameraIn, principal: dict = Depends(auth.require_admi
         fields.update(_push_fields())
     else:
         fields["source_url"] = ""      # an RTSP camera never carries an RTMP link
-    camera_id = camera_db.add_camera(payload.name, payload.site, **fields)
+    # The Master Portal license's camera limit (none in standalone mode).
+    # Checked and added under one lock so two adds at once can't both slip in.
+    with _camera_limit_lock:
+        limit = master_link.max_cameras()
+        if limit is not None and len(camera_db.list_cameras()) >= limit:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your SMC license allows {limit} camera(s) and all are in use. "
+                       "Contact your administrator to increase the limit.",
+            )
+        camera_id = camera_db.add_camera(payload.name, payload.site, **fields)
+    _report_cameras_soon()
     audit.record("camera.create", principal, target=f"camera:{camera_id}", name=payload.name, protocol=payload.protocol)
     cam = camera_db.get_camera(camera_id)
     if payload.protocol == stream_source.PUSH_PROTOCOL:
@@ -555,6 +587,7 @@ def delete_camera(camera_id: int, principal: dict = Depends(auth.require_admin))
     # Stop its read loop and reader process now, not at the next restart.
     camera_stream.remove_stream(camera_id)
     ingest.forget(camera_id)
+    _report_cameras_soon()
     audit.record("camera.delete", principal, target=f"camera:{camera_id}")
     return {"ok": True}
 
@@ -673,10 +706,15 @@ def login(payload: LoginIn, request: Request):
 
 @app.get("/api/auth/me")
 def me(principal: dict = Depends(auth.require_admin)):
+    # `license` is the Master Portal license summary (mode "standalone" when
+    # SMC isn't connected); the frontend gates pages on its features.
+    if principal.get("sso_license_id"):
+        return {"email": "", "name": principal.get("sso_name") or principal.get("sso_username"),
+                "username": principal.get("sso_username"), "sso": True, "license": master_link.summary()}
     admin = auth.get_admin_user(principal["admin_user_id"])
     if admin is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return {"email": admin["email"], "name": admin["name"]}
+    return {"email": admin["email"], "name": admin["name"], "sso": False, "license": master_link.summary()}
 
 
 @app.post("/api/auth/logout")

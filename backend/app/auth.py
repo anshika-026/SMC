@@ -32,7 +32,7 @@ import uuid
 
 from fastapi import Depends, Header, HTTPException
 
-from . import config, db, license_db, passwords
+from . import config, db, license_db, master_link, passwords
 
 log = logging.getLogger("auth")
 
@@ -80,6 +80,11 @@ def init_db() -> None:
             """
         )
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+        # Sessions opened by a Master Portal sign-in (master_link.py): an SMC
+        # operator session tied to the license instead of an admin_users row.
+        for col in ("sso_license_id", "sso_username", "sso_name", "sso_role"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
         if "admin_user_id" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN admin_user_id TEXT")
             # Every admin session that exists at this point was issued by the
@@ -223,6 +228,25 @@ def create_admin_session(admin: dict) -> str:
     return token
 
 
+def create_sso_session(claims: dict) -> str:
+    """A session for a client who signed in on the Master Portal (claims of a
+    verified launch token, master_link.verify_launch_token). It works like an
+    admin session everywhere in SMC, but is bound to the license rather than an
+    admin_users row, and get_session drops it as soon as the license stops
+    allowing access."""
+    token = _new_token()
+    now = time.time()
+    username = str(claims.get("username") or "")[:128]
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token, principal_type, email, created_at, expires_at, "
+            " sso_license_id, sso_username, sso_name, sso_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (token, ADMIN, username, now, now + SESSION_TTL_SECONDS, claims["sub"], username,
+             str(claims.get("name") or claims.get("company") or username)[:128], str(claims.get("role") or "")[:32]),
+        )
+    return token
+
+
 def create_client_session(license_id: str) -> str:
     token = _new_token()
     now = time.time()
@@ -266,7 +290,14 @@ def get_session(token: str | None) -> dict | None:
         if session["expires_at"] < time.time():
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             return None
-        if session["principal_type"] == ADMIN:
+        if session["principal_type"] == ADMIN and session.get("sso_license_id"):
+            # Master Portal sign-in: valid only while that license is the one
+            # this deployment serves and it still allows access.
+            if (not master_link.enabled() or session["sso_license_id"] != config.MASTER_LICENSE_ID
+                    or master_link.license_problem() is not None):
+                conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                return None
+        elif session["principal_type"] == ADMIN:
             admin = conn.execute(
                 "SELECT is_active FROM admin_users WHERE id = ?", (session.get("admin_user_id"),)
             ).fetchone()
