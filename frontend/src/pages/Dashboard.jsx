@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link as RouterLink, useNavigate } from "react-router-dom";
+import { Link as RouterLink } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { ArrowDownRight, ArrowUpRight, CalendarDays, ChevronRight, ClipboardList, Footprints, Minus, ShieldAlert, ShieldX, TrendingUp, UserCheck, Users } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, CalendarDays, ChevronRight, ClipboardList, Footprints, Minus, ShieldAlert, TrendingUp, UserCheck, Users } from "lucide-react";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
 import { FootfallDetail, SecurityDetail, VisitorsDetail, WorkforceDetail } from "../components/dashboard/DashboardDetails";
@@ -23,12 +23,10 @@ const CARD_TONE = {
   violet: { icon: "bg-violet-50 text-violet-600", bar: "from-violet-500/70" },
   emerald: { icon: "bg-emerald-50 text-emerald-600", bar: "from-emerald-500/70" },
   rose: { icon: "bg-rose-50 text-rose-600", bar: "from-rose-500/70" },
-  amber: { icon: "bg-amber-50 text-amber-600", bar: "from-amber-500/70" },
 };
 const DOT = { ok: "bg-emerald-500", warn: "bg-amber-500", bad: "bg-rose-500", none: "bg-slate-300" };
 
 export default function Dashboard() {
-  const navigate = useNavigate();
   const [date, setDate] = useState(todayIso);
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -95,18 +93,9 @@ export default function Dashboard() {
       primary: s ? s.active : "—", primaryLabel: "active alerts", delta: s ? { ...s.vs_previous, label: "raised" } : null, better: "down",
       rows: s ? [
         { label: "Unknown persons", value: s.unknown_persons, tone: s.unknown_persons ? "warn" : "ok" },
-        { label: "Intrusion alerts", value: s.intrusion ?? "Not set up", tone: "none" },
-        { label: "Restricted-area violations", value: s.restricted_violations, tone: s.restricted_violations ? "bad" : "ok" },
-      ] : [],
-    },
-    {
-      // Opens the Intrusion page itself (the same page as Security & Safety > Intrusion).
-      key: "intrusion", title: "Intrusion", icon: ShieldX, tone: "amber", available: s?.intrusion != null, to: "/intrusion",
-      primary: s?.intrusion ?? "—", primaryLabel: "intrusion alerts", delta: null, better: "down",
-      rows: s?.intrusion != null ? [
-        { label: "Still open", value: s.intrusion_open, tone: s.intrusion_open ? "bad" : "ok" },
-        { label: "Loitering", value: s.loitering, tone: s.loitering ? "warn" : "ok" },
-        { label: "With video clip", value: s.intrusion_with_clip, tone: "none" },
+        // Intrusion = restricted-area / entry-gate alerts; loitering = stayed too long (intrusion.py).
+        { label: "Intrusion", value: s.intrusion == null ? "Not set up" : s.restricted_violations, tone: s.intrusion == null ? "none" : s.restricted_violations ? "bad" : "ok" },
+        { label: "Loitering", value: s.loitering ?? "Not set up", tone: s.loitering == null ? "none" : s.loitering ? "warn" : "ok" },
       ] : [],
     },
   ];
@@ -134,10 +123,10 @@ export default function Dashboard() {
 
       {error && <p className="text-sm text-danger-500">{error}</p>}
 
-      {/* The five areas (the fifth, Intrusion, opens its own page). One row on desktop; swipe sideways on a phone. */}
-      <div className="flex lg:grid lg:grid-cols-5 gap-4 overflow-x-auto lg:overflow-visible snap-x snap-mandatory pb-1 -mx-1 px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {/* The four questions. One row on desktop; swipe sideways on a phone. */}
+      <div className="flex lg:grid lg:grid-cols-4 gap-4 overflow-x-auto lg:overflow-visible snap-x snap-mandatory pb-1 -mx-1 px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {cards.map((c) => (
-          <KpiCard key={c.key} card={c} loading={!b} onOpen={() => (c.to ? navigate(c.to) : setOpen(c.key))} />
+          <KpiCard key={c.key} card={c} loading={!b} onOpen={() => setOpen(c.key)} />
         ))}
       </div>
 

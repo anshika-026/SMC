@@ -350,10 +350,14 @@ export function SecurityDetail({ b, onClose }) {
         <Tiles items={[
           { label: "Active alerts", value: s.active, tone: s.high_or_critical ? "bad" : s.active ? "warn" : null, sub: `${s.high_or_critical} high or critical` },
           { label: "Unknown persons", value: s.unknown_persons, tone: s.unknown_persons ? "warn" : null },
-          { label: "Restricted-area violations", value: s.restricted_violations, tone: s.restricted_violations ? "bad" : null, sub: s.restricted_entries !== null ? `${s.restricted_entries} entries logged` : null },
-          s.intrusion == null
-            ? { label: "Intrusion / loitering", value: "Not set up", sub: "not included in this installation" }
-            : { label: "Intrusion / loitering", value: s.intrusion, tone: s.intrusion_open ? "bad" : null, sub: `${s.loitering} loitering · ${s.intrusion_open} open` },
+          ...(s.intrusion == null
+            ? [{ label: "Intrusion / loitering", value: "Not set up", sub: "not included in this installation" }]
+            : [
+              // Intrusion = restricted-area / entry-gate alerts; loitering = stayed too long (intrusion.py).
+              { label: "Intrusion", value: s.restricted_violations, tone: s.restricted_violations ? "bad" : null,
+                sub: `${s.restricted_entries ?? 0} detections logged · ${s.intrusion_with_clip} with video` },
+              { label: "Loitering", value: s.loitering, tone: s.loitering ? "warn" : null, sub: `${s.intrusion_open} intrusion / loitering open` },
+            ]),
         ]} />
 
         <Block title={`Unresolved alerts (${s.open.length})`}>

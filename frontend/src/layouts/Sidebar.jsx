@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import {
   Gauge,
   MonitorPlay,
   Siren,
   ShieldAlert,
-  BarChart3,
   Fingerprint,
   UserCheck,
   ScanFace,
@@ -53,8 +52,6 @@ const NAV_SECTIONS = [
       // Attendance is built from face recognition sightings (backend/app/attendance.py).
       { to: "/attendance", label: "Attendance", icon: CalendarCheck, requiresFeature: "attendance", analytics: "face_recognition", license: "attendance" },
       { to: "/visitors", label: "Visitor Management", icon: Contact, requiresFeature: "footfall_analytics", analytics: "visitors" },
-      // The Intrusion page's Analytics tab (same page as Security & Safety > Intrusion).
-      { to: "/intrusion?tab=analytics", label: "Intrusion Analytics", icon: BarChart3, analytics: "intrusion", license: "intrusion_detection" },
     ],
   },
   {
@@ -75,14 +72,6 @@ const NAV_SECTIONS = [
 
 export default function Sidebar() {
   const { user } = useAuth();
-  // Two menu items open the Intrusion page (its alerts, and its ?tab=analytics); only the one
-  // for the tab on screen is highlighted. Everything else uses NavLink's own match.
-  const location = useLocation();
-  const activeFor = (to, hit) => {
-    if (!to.startsWith("/intrusion")) return hit;
-    const analytics = new URLSearchParams(location.search).get("tab") === "analytics";
-    return location.pathname === "/intrusion" && (to.includes("tab=analytics") ? analytics : !analytics);
-  };
   const isClient = user?.role === "client";
   // Live badge counts (currently: active alerts), refreshed every 30 s.
   const [counts, setCounts] = useState({});
@@ -136,14 +125,14 @@ export default function Sidebar() {
                       to={to}
                       className={({ isActive: hit }) =>
                         `group flex items-center gap-2.5 pl-1.5 pr-2.5 py-1 rounded-xl text-[13px] transition-all ${
-                          activeFor(to, hit)
+                          hit
                             ? "bg-gradient-to-r from-indigo-500 to-violet-500 text-white shadow-[0_6px_16px_-6px_rgba(99,102,241,0.65)]"
                             : "text-slate-600 hover:bg-indigo-50/60 hover:text-ink-900"
                         }`
                       }
                     >
                       {({ isActive: hit }) => {
-                        const isActive = activeFor(to, hit);
+                        const isActive = hit;
                         return (
                           <>
                             <span
