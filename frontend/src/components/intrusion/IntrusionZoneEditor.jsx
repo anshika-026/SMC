@@ -15,7 +15,7 @@ import { ZONE_TYPES, dwellProblem, minutesToSeconds, secondsToMinutes } from "..
 
 const ZONE_COLOR = "#ef4444";
 const SEVERITIES = ["Critical", "High", "Medium", "Low"];
-const EMPTY_FORM = { name: "", area: "", gate: false, from: "", to: "", type: "restricted", minutes: "15", severity: "", alertsEnabled: true };
+const EMPTY_FORM = { name: "", area: "", gate: false, from: "", to: "", type: "restricted", minutes: "15", severity: "", alertsEnabled: true, enabled: true };
 
 function formFor(zone, preset) {
   if (!zone) return { ...EMPTY_FORM, ...(preset || {}) };
@@ -29,6 +29,7 @@ function formFor(zone, preset) {
     minutes: secondsToMinutes(zone.dwell_seconds) || "15",
     severity: zone.severity || "",
     alertsEnabled: zone.alerts_enabled !== false,
+    enabled: zone.enabled !== false,
   };
 }
 
@@ -71,6 +72,7 @@ export default function IntrusionZoneEditor({ open, zone = null, preset = null, 
       dwell_seconds: form.type === "loitering" ? dwellSeconds : null,
       severity: form.severity || null,
       alerts_enabled: form.alertsEnabled,
+      ...(zone ? { enabled: form.enabled } : {}),
     };
   }
 
@@ -138,6 +140,11 @@ export default function IntrusionZoneEditor({ open, zone = null, preset = null, 
       <label className="flex items-center gap-2 self-end pb-2">
         <input type="checkbox" checked={form.alertsEnabled} onChange={set("alertsEnabled")} /> Raise alerts for this zone
       </label>
+      {zone && (
+        <label className="flex items-center gap-2 self-end pb-2">
+          <input type="checkbox" checked={form.enabled} onChange={set("enabled")} /> Monitoring on
+        </label>
+      )}
       <p className="text-xs text-slate-500 sm:col-span-3 -mt-1">
         Leave both times empty to guard around the clock. 19:00 to 08:00 guards overnight only.
         {!windowValid && <span className="text-danger-500"> Set both times, or neither.</span>}

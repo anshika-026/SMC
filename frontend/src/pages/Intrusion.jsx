@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { DoorOpen, Download, Film, Plus, ShieldAlert } from "lucide-react";
+import { DoorOpen, Download, Film, MapPinned, ShieldAlert } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import DataTable from "../components/DataTable";
@@ -11,19 +11,20 @@ import Tabs from "../components/Tabs";
 import SidePanel from "../components/SidePanel";
 import AlertClip from "../components/intrusion/AlertClip";
 import IntrusionKpiCards from "../components/intrusion/IntrusionKpiCards";
-import IntrusionZoneEditor from "../components/intrusion/IntrusionZoneEditor";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
-import { formatDuration, zoneAlertLabel, zoneTypeLabel } from "../lib/zoneSettings";
+import { formatDuration } from "../lib/zoneSettings";
 
 // Intrusion & loitering (backend/app/intrusion.py, ported from MAINDV): restricted areas and entry
 // gates alert when someone's feet are inside them during their active hours; loitering zones alert
 // when someone stays longer than the zone's duration. Every alert gets a ~10 s evidence clip.
 // One page, reached from the dashboard's Intrusion card, Security & Safety > Intrusion and
-// Analytics > Intrusion analytics (?tab=analytics).
+// Analytics > Intrusion analytics (?tab=analytics). Zones (outline, active hours, timer) are managed
+// in Visitor Management > Zones & areas, with the same zone editor.
 
-const TABS = ["Alerts", "Zones & schedule", "Analytics"];
-const TAB_PARAM = { alerts: "Alerts", zones: "Zones & schedule", analytics: "Analytics" };
+const TABS = ["Alerts", "Analytics"];
+const TAB_PARAM = { alerts: "Alerts", analytics: "Analytics" };
+const ZONES_PAGE = "/visitors?tab=zones";
 const BAR = "#4f5fea";
 const REFRESH_MS = 20000;
 
@@ -46,7 +47,6 @@ export default function Intrusion() {
   const [today, setToday] = useState(null);         // today's alerts (cards)
   const [processing, setProcessing] = useState(null); // the "intrusion" analytics switch
   const [error, setError] = useState("");
-  const [editor, setEditor] = useState(null);       // {zone?}
 
   const load = useCallback(() => {
     const d = iso(new Date());
@@ -81,9 +81,9 @@ export default function Intrusion() {
       <PageHeader
         title="Intrusion"
         action={
-          <button onClick={() => setEditor({})} className="btn-primary text-sm inline-flex items-center gap-1.5">
-            <Plus size={15} /> New zone
-          </button>
+          <Link to={ZONES_PAGE} className="btn-secondary text-sm inline-flex items-center gap-1.5">
+            <MapPinned size={15} /> Manage zones
+          </Link>
         }
       />
       {error && <p className="text-sm text-danger-500">{error}</p>}
@@ -111,17 +111,15 @@ export default function Intrusion() {
         zones={zones}
         refreshKey={today}
         onAlerts={() => pickTab("Alerts")}
-        onZones={() => pickTab("Zones & schedule")}
+        zonesPage={ZONES_PAGE}
         onAnalytics={() => pickTab("Analytics")}
       />
 
       <Tabs tabs={TABS} active={tab} onChange={pickTab} />
 
       {tab === "Alerts" && <AlertsTab zones={zones} cameras={cameras} onChanged={load} />}
-      {tab === "Zones & schedule" && <ZonesTab zones={zones} cameras={cameras} onEdit={(z) => setEditor({ zone: z })} onChanged={load} />}
       {tab === "Analytics" && <AnalyticsTab zones={zones} cameras={cameras} />}
 
-      <IntrusionZoneEditor open={!!editor} zone={editor?.zone || null} cameras={cameras} onClose={() => setEditor(null)} onChanged={load} />
     </div>
   );
 }
@@ -344,98 +342,6 @@ function AlertsTab({ zones, cameras, onChanged }) {
         )}
       </SidePanel>
     </div>
-  );
-}
-
-// ---------------------------------------------------------------- zones
-
-function ZonesTab({ zones, onEdit, onChanged }) {
-  const [confirmDelete, setConfirmDelete] = useState(null);
-  // The same area + zone name on several cameras is one zone watched by those cameras.
-  const watchers = useMemo(() => {
-    const m = {};
-    for (const z of zones) {
-      const k = `${z.area}|${z.name}`.toLowerCase();
-      m[k] = (m[k] || 0) + 1;
-    }
-    return m;
-  }, [zones]);
-
-  async function setEnabled(zone, enabled) {
-    await api.intrusionApi.updateZone(zone.id, { enabled });
-    onChanged();
-  }
-  async function remove(zone) {
-    await api.intrusionApi.deleteZone(zone.id);
-    setConfirmDelete(null);
-    onChanged();
-  }
-
-  return (
-    <DataTable
-      rows={[...zones].sort((a, b) => `${a.area}|${a.name}|${a.camera_name}`.localeCompare(`${b.area}|${b.name}|${b.camera_name}`))}
-      emptyLabel="No intrusion zones yet. Use “New zone” to draw one on a camera."
-      columns={[
-        { key: "area", label: "Area", render: (z) => z.area || <span className="text-slate-400">-</span> },
-        {
-          key: "name",
-          label: "Zone",
-          render: (z) => (
-            <span>
-              {z.name}
-              {z.is_entry_gate && <span className="badge badge-neutral text-[10px] ml-1">Entry gate</span>}
-              {watchers[`${z.area}|${z.name}`.toLowerCase()] > 1 && (
-                <span className="block text-[11px] text-slate-400">watched by {watchers[`${z.area}|${z.name}`.toLowerCase()]} cameras</span>
-              )}
-            </span>
-          ),
-        },
-        { key: "camera_name", label: "Camera", render: (z) => <span>{z.camera_name} <span className="text-xs text-slate-400">#{z.camera_id}</span></span> },
-        {
-          key: "zone_type",
-          label: "Type / alerts",
-          render: (z) => (
-            <span>
-              {zoneTypeLabel(z)}
-              <span className="block text-xs text-slate-400">{zoneAlertLabel(z)}</span>
-            </span>
-          ),
-        },
-        { key: "hours", label: "Active hours", render: (z) => (z.active_from ? `${z.active_from} – ${z.active_to}` : "Always") },
-        { key: "state", label: "Now", render: (z) => <StatusBadge value={!z.enabled ? "Off" : z.active_now ? "Guarding" : "Outside hours"} /> },
-        { key: "intrusions_today", label: "Detections today", render: (z) => (z.zone_type === "loitering" ? "-" : z.intrusions_today) },
-        { key: "last", label: "Last", render: (z) => clock(z.last_intrusion) },
-        { key: "enabled", label: "Enabled", render: (z) => <ToggleSwitch checked={z.enabled} onChange={(v) => setEnabled(z, v)} /> },
-        {
-          key: "edit",
-          label: "",
-          render: (z) => (
-            <button type="button" onClick={() => onEdit(z)} className="text-brand-600 text-sm">
-              Edit
-            </button>
-          ),
-        },
-        {
-          key: "action",
-          label: "",
-          render: (z) =>
-            confirmDelete === z.id ? (
-              <span className="text-sm flex items-center gap-2">
-                <button type="button" onClick={() => remove(z)} className="text-danger-500 font-medium">
-                  Delete
-                </button>
-                <button type="button" onClick={() => setConfirmDelete(null)} className="text-slate-500">
-                  Keep
-                </button>
-              </span>
-            ) : (
-              <button type="button" onClick={() => setConfirmDelete(z.id)} className="text-slate-500 text-sm">
-                Remove
-              </button>
-            ),
-        },
-      ]}
-    />
   );
 }
 

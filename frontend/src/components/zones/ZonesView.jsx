@@ -264,7 +264,7 @@ function IntrusionActivity({ zone }) {
         </table>
       )}
       {playing && <AlertClip key={playing.id} alertId={playing.id} clipStatus={playing.clip_status} label={`${playing.event} ${playing.zone_name}`} />}
-      <a href="/intrusion?tab=zones" className="text-xs text-brand-600">Manage all intrusion zones on the Intrusion page</a>
+      <a href="/intrusion" className="text-xs text-brand-600">All intrusion alerts and analytics on the Intrusion page</a>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import InsightCard from "../workforce/InsightCard";
 import * as api from "../../api/client";
 import { shiftIso, todayIso } from "../workforce/shared";
@@ -8,7 +9,7 @@ import { formatDuration } from "../../lib/zoneSettings";
 // Management (InsightCard: arrows / swipe page through a card's views, a click
 // opens the tab for the view shown):
 //   Intrusion Activity  today's intrusion / loitering alerts  -> Alerts
-//   Zone Monitoring     zones guarding now, detections        -> Zones & schedule
+//   Zone Monitoring     zones guarding now, detections        -> Visitor Management > Zones & areas
 //   Intrusion Trends    alerts over 7 / 30 days, peak, camera -> Analytics
 // Real records only: /intrusion/alerts and /intrusion/events for the last 30 days.
 
@@ -25,7 +26,9 @@ const dayOf = (ts) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 
-export default function IntrusionKpiCards({ zones, refreshKey, onAlerts, onZones, onAnalytics }) {
+export default function IntrusionKpiCards({ zones, refreshKey, onAlerts, zonesPage, onAnalytics }) {
+  const navigate = useNavigate();
+  const onZones = () => navigate(zonesPage);
   const [period, setPeriod] = useState({ activity: "week", zones: "week", trends: "month" });
   const [alerts, setAlerts] = useState(null);
   const [events, setEvents] = useState([]);
@@ -130,7 +133,7 @@ export default function IntrusionKpiCards({ zones, refreshKey, onAlerts, onZones
             value: guarding.length,
             total: Math.max(enabled.length, 1),
             people: guarding.slice(0, 6).map((z) => ({ name: `${z.area ? `${z.area} · ` : ""}${z.name}`, hint: z.camera_name })),
-            insight: zones.length ? `${guarding.length} of ${plural(enabled.length, "enabled zone")} inside their active hours.` : "No zones yet. Draw one under Zones & schedule.",
+            insight: zones.length ? `${guarding.length} of ${plural(enabled.length, "enabled zone")} inside their active hours.` : "No zones yet. Draw one in Visitor Management > Zones & areas.",
             onOpen: onZones,
           },
           {
