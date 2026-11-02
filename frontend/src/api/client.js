@@ -262,8 +262,8 @@ export const intrusionApi = {
   events: (start, end) => request(`/intrusion/events${qs({ start, end })}`),
   alerts: (filters = {}) => request(`/intrusion/alerts${qs(filters)}`),
   analytics: (filters = {}) => request(`/intrusion/analytics${qs(filters)}`),
-  async exportXlsx(start, end) {
-    const res = await fetch(`${BASE_URL}/intrusion/export${qs({ start, end })}`, { headers: { ...authHeaders() } });
+  async exportXlsx(start, end, extra = {}) {
+    const res = await fetch(`${BASE_URL}/intrusion/export${qs({ start, end, ...extra })}`, { headers: { ...authHeaders() } });
     if (res.status === 401) handleAuthFailure();
     if (!res.ok) throw new Error(`Export failed (${res.status})`);
     saveBlob(await res.blob(), `intrusion_${start}_${end}.xlsx`);

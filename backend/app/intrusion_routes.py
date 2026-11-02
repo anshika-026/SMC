@@ -199,29 +199,38 @@ def intrusion_events(start: str | None = None, end: str | None = None):
     return intrusion.events_list(start_ts, end_ts)
 
 
+def _check_type(alert_type: str | None) -> str | None:
+    if alert_type and alert_type not in intrusion.ALERT_TYPES:
+        raise HTTPException(status_code=422, detail=f"type must be one of: {', '.join(intrusion.ALERT_TYPES)}")
+    return alert_type or None
+
+
 @router.get("/alerts")
 def intrusion_alerts(start: str | None = None, end: str | None = None, camera_id: int | None = None,
-                     zone_id: int | None = None, status: str | None = None, q: str = Query("", max_length=100)):
+                     zone_id: int | None = None, status: str | None = None, q: str = Query("", max_length=100),
+                     type: str | None = None):
     if status and status not in ("Active", "Acknowledged", "Resolved"):
         raise HTTPException(status_code=422, detail="status must be Active, Acknowledged or Resolved")
     start_ts, end_ts, _s, _e = _parse_range(start, end)
-    return {"alerts": intrusion.list_alerts(start_ts, end_ts, camera_id=camera_id, zone_id=zone_id, status=status or None, q=q)}
+    return {"alerts": intrusion.list_alerts(start_ts, end_ts, camera_id=camera_id, zone_id=zone_id, status=status or None, q=q,
+                                            alert_type=_check_type(type))}
 
 
 @router.get("/analytics")
 def intrusion_analytics(start: str | None = None, end: str | None = None, camera_id: int | None = None,
-                        zone_id: int | None = None):
+                        zone_id: int | None = None, type: str | None = None):
     start_ts, end_ts, start_d, end_d = _parse_range(start, end)
     return {"start": start_d.isoformat(), "end": end_d.isoformat(),
-            **intrusion.analytics(start_ts, end_ts, camera_id=camera_id, zone_id=zone_id)}
+            **intrusion.analytics(start_ts, end_ts, camera_id=camera_id, zone_id=zone_id, alert_type=_check_type(type))}
 
 
 @router.get("/export")
-def intrusion_export(start: str | None = None, end: str | None = None):
+def intrusion_export(start: str | None = None, end: str | None = None, camera_id: int | None = None,
+                     type: str | None = None):
     from app import visitor_registry   # SMC's existing minimal .xlsx writer
 
     start_ts, end_ts, start_d, end_d = _parse_range(start, end)
-    rows = intrusion.list_alerts(start_ts, end_ts, limit=100_000)
+    rows = intrusion.list_alerts(start_ts, end_ts, camera_id=camera_id, limit=100_000, alert_type=_check_type(type))
     header = ["Time", "Event", "Camera", "Area", "Zone", "Entry gate", "Duration (s)", "Severity", "Status", "Clip", "Message"]
     data = [[datetime.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d %H:%M:%S"), r["event"], r["camera_name"], r["area"],
              r["zone_name"], "Yes" if r["is_entry_gate"] else "", round(r["duration_seconds"]), r["severity"], r["status"],

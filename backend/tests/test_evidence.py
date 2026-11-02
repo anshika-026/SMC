@@ -219,3 +219,18 @@ def test_dashboard_security_counts_intrusions(env, monkeypatch):
     alerts.raise_alert("Loitering Detected", "Medium", cam, "y", now=time.time())
     s = insights.business_overview()["security"]
     assert (s["intrusion"], s["loitering"], s["restricted_violations"], s["intrusion_open"]) == (2, 1, 1, 2)
+
+
+def test_alert_type_filter_and_previous_period(api, admin_token, env):
+    rec, svc, cam, tmp = env
+    now = time.time()
+    alerts.raise_alert("Intrusion Detected", "High", cam, "a", now=now - 60)
+    alerts.raise_alert("Loitering Detected", "Medium", cam, "b", now=now - 30)
+    alerts.raise_alert("Intrusion Detected", "High", cam, "c", now=now - 10 * 86400)   # the previous 7-day period
+    h = bearer(admin_token)
+    assert [a["event"] for a in api.get("/api/intrusion/alerts?type=loitering", headers=h).json()["alerts"]] == ["Loitering Detected"]
+    assert api.get("/api/intrusion/alerts?type=nope", headers=h).status_code == 422
+    an = api.get("/api/intrusion/analytics", headers=h).json()          # last 7 days
+    assert (an["total"], an["previous"]["total"], an["previous"]["intrusions"]) == (2, 1, 1)
+    only = api.get("/api/intrusion/analytics?type=intrusion", headers=h).json()
+    assert (only["total"], only["loitering"]) == (1, 0)

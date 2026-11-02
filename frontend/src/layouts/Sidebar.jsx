@@ -52,11 +52,7 @@ const NAV_SECTIONS = [
       // Attendance is built from face recognition sightings (backend/app/attendance.py).
       { to: "/attendance", label: "Attendance", icon: CalendarCheck, requiresFeature: "attendance", analytics: "face_recognition", license: "attendance" },
       { to: "/visitors", label: "Visitor Management", icon: Contact, requiresFeature: "footfall_analytics", analytics: "visitors" },
-    ],
-  },
-  {
-    title: "Security & Safety",
-    items: [
+      // Intrusion Detection: alerts, their videos and historical insights on one page.
       { to: "/intrusion", label: "Intrusion", icon: ShieldAlert, analytics: "intrusion", license: "intrusion_detection" },
     ],
   },

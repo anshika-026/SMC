@@ -97,7 +97,7 @@ export default function App() {
             <Route path="/live-feed" element={<Page><PlainLiveFeed /></Page>} />
             <Route path="/live-camera" element={<Feature name="live_overlay"><Page><LiveFeed /></Page></Feature>} />
             <Route path="/alerts" element={<Page><Alerts /></Page>} />
-            {/* One page for the dashboard Intrusion card, Security & Safety > Intrusion and Analytics > Intrusion analytics. */}
+            {/* Intrusion Detection: alerts, videos and historical insights on one page (Analytics > Intrusion). */}
             <Route path="/intrusion" element={<Feature name="intrusion" license="intrusion_detection"><Page><Intrusion /></Page></Feature>} />
             <Route path="/people" element={<Feature name="face_recognition"><Page><People /></Page></Feature>} />
             <Route path="/face-recognition" element={<Feature name="face_recognition"><Page><FaceRecognition /></Page></Feature>} />

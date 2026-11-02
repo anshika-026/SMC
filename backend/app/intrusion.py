@@ -246,15 +246,18 @@ def stats(days: int = 7, now: float | None = None, camera_ids: set[int] | None =
 # ---- alert history and analytics (SMC Intrusion page) -------------------------
 
 ALERT_EVENTS = ("Intrusion Detected", "Loitering Detected")
+# The Intrusion page's alert-type filter: intrusion (restricted areas / entry gates) or loitering.
+ALERT_TYPES = {"intrusion": "Intrusion Detected", "loitering": "Loitering Detected"}
 
 
 def list_alerts(start_ts: float, end_ts: float, camera_id: int | None = None, zone_id: int | None = None,
-                status: str | None = None, q: str = "", limit: int = 2000) -> list[dict]:
+                status: str | None = None, q: str = "", limit: int = 2000, alert_type: str | None = None) -> list[dict]:
     """Intrusion and loitering alerts (alerts.py rows) in [start_ts, end_ts], newest first.
     duration_seconds: how long the intrusion lasted as far as the alert knows (first detection to
     the last one counted against it); for a loitering alert, at least the zone's duration."""
-    sql = (f"SELECT * FROM alerts WHERE event IN ({','.join('?' * len(ALERT_EVENTS))}) AND ts >= ? AND ts <= ?")
-    params: list = [*ALERT_EVENTS, start_ts, end_ts]
+    events = (ALERT_TYPES[alert_type],) if alert_type else ALERT_EVENTS
+    sql = (f"SELECT * FROM alerts WHERE event IN ({','.join('?' * len(events))}) AND ts >= ? AND ts <= ?")
+    params: list = [*events, start_ts, end_ts]
     if camera_id is not None:
         sql, params = sql + " AND camera_id = ?", params + [camera_id]
     if zone_id is not None:
@@ -290,12 +293,17 @@ def list_alerts(start_ts: float, end_ts: float, camera_id: int | None = None, zo
     return out
 
 
-def analytics(start_ts: float, end_ts: float, camera_id: int | None = None, zone_id: int | None = None) -> dict:
+def analytics(start_ts: float, end_ts: float, camera_id: int | None = None, zone_id: int | None = None,
+              alert_type: str | None = None) -> dict:
     """Business view of real intrusion records over a date range: totals, by camera, by zone /
-    area, by hour of day (peak times) and by day. Counts are alerts (one per intrusion; repeat
-    detections while it is open count against the same alert), with the itemized detections
-    (intrusion_events) alongside."""
-    items = list_alerts(start_ts, end_ts, camera_id=camera_id, zone_id=zone_id, limit=100_000)
+    area, by hour of day (peak times) and by day, plus the same totals for the previous period of
+    equal length (to say whether incidents are rising or falling). Counts are alerts (one per
+    intrusion; repeat detections while it is open count against the same alert), with the
+    itemized detections (intrusion_events) alongside."""
+    items = list_alerts(start_ts, end_ts, camera_id=camera_id, zone_id=zone_id, limit=100_000, alert_type=alert_type)
+    length = end_ts - start_ts
+    prev = list_alerts(start_ts - length - 1, start_ts - 1, camera_id=camera_id, zone_id=zone_id, limit=100_000,
+                       alert_type=alert_type)
     ev_sql, ev_params = "SELECT zone_id, camera_id, ts FROM intrusion_events WHERE ts >= ? AND ts <= ?", [start_ts, end_ts]
     if camera_id is not None:
         ev_sql, ev_params = ev_sql + " AND camera_id = ?", ev_params + [camera_id]
@@ -335,6 +343,13 @@ def analytics(start_ts: float, end_ts: float, camera_id: int | None = None, zone
         "by_hour": [{"hour": h, "label": f"{h:02d}:00", "count": per_hour[h]} for h in range(24)],
         "peak_hour": peak,
         "per_day": [{"date": d, "count": n} for d, n in sorted(per_day.items())],
+        "previous": {
+            "start": datetime.date.fromtimestamp(start_ts - length - 1).isoformat(),
+            "end": datetime.date.fromtimestamp(start_ts - 1).isoformat(),
+            "total": len(prev),
+            "intrusions": sum(1 for it in prev if it["event"] == "Intrusion Detected"),
+            "loitering": sum(1 for it in prev if it["event"] == "Loitering Detected"),
+        },
     }
 
 
