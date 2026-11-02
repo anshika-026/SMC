@@ -70,6 +70,7 @@ PURGE_INTERVAL_SECONDS = 3600
 DEFAULT_SETTINGS = {
     "media_retention_days": 30,
     "long_stay_minutes": 120,
+    "waiting_alert_minutes": 15,       # a checked-in visitor not yet met for longer than this needs attention
     "default_gate_camera_id": None,
     "notice_text": ("This building is monitored by CCTV. With your permission, one photo of you is taken "
                     "at entry and kept with this visit record for {days} days. You may decline; your visit "
@@ -290,7 +291,7 @@ def get_settings() -> dict:
 def _decode_setting(key, value):
     if value is None:
         return None
-    if key in ("media_retention_days", "long_stay_minutes", "default_gate_camera_id"):
+    if key in ("media_retention_days", "long_stay_minutes", "waiting_alert_minutes", "default_gate_camera_id"):
         return int(value)
     return value
 
@@ -307,6 +308,11 @@ def set_settings(changes: dict, principal=None) -> dict:
         if not 10 <= m <= 24 * 60:
             raise RegistryError("Long-stay threshold must be between 10 minutes and 24 hours.")
         allowed["long_stay_minutes"] = m
+    if "waiting_alert_minutes" in changes:
+        m = int(changes["waiting_alert_minutes"])
+        if not 1 <= m <= 240:
+            raise RegistryError("Waiting threshold must be between 1 and 240 minutes.")
+        allowed["waiting_alert_minutes"] = m
     if "default_gate_camera_id" in changes:
         cid = changes["default_gate_camera_id"]
         if cid not in (None, ""):
@@ -1231,7 +1237,9 @@ def kpis(day: str | None = None, now: float | None = None) -> dict:
     month = day[:7]
     long_stay = get_settings()["long_stay_minutes"] * 60
     today = list_visits(date_from=day, date_to=day, limit=100_000, now=now)
-    month_rows = list_visits(date_from=f"{month}-01", date_to=f"{month}-31", limit=100_000, now=now)
+    first = datetime.date.fromisoformat(f"{month}-01")
+    last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)   # the month's real last day
+    month_rows = list_visits(date_from=first.isoformat(), date_to=last.isoformat(), limit=100_000, now=now)
     with _conn() as conn:
         inside_now = conn.execute("SELECT COUNT(*) FROM vm_visits WHERE status = 'in'").fetchone()[0]
     # A visitor is first-time today when today holds their first visit ever,
@@ -1263,6 +1271,15 @@ def kpis(day: str | None = None, now: float | None = None) -> dict:
         "inside_names": [r["visitor_name"] for r in today if r["status"] == IN][:10],
         "pending_names": [r["visitor_name"] for r in today if r["status"] == PENDING][:10],
     }
+
+
+def waiting_now(now: float | None = None) -> list[dict]:
+    """Visitors inside who have not met their host yet, longest wait first."""
+    now = now if now is not None else _now()
+    rows = list_visits(status=IN, limit=1000, now=now)
+    out = [{"visit_id": r["id"], "visitor_name": r["visitor_name"], "host_name": r["host_name"],
+            "waiting_seconds": now - r["entry_at"]} for r in rows if r["entry_at"] and r["meeting_start_at"] is None]
+    return sorted(out, key=lambda w: -w["waiting_seconds"])
 
 
 def analytics(date_from: str, date_to: str, now: float | None = None) -> dict:

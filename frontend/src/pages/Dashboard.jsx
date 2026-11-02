@@ -1,405 +1,276 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
-import {
-  AlertTriangle,
-  Building2,
-  CalendarDays,
-  ClipboardList,
-  Footprints,
-  Siren,
-  Sparkles,
-  UserCheck,
-  Users,
-} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Link as RouterLink } from "react-router-dom";
+import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { ArrowDownRight, ArrowUpRight, CalendarDays, ChevronRight, ClipboardList, Footprints, Minus, ShieldAlert, TrendingUp, UserCheck, Users } from "lucide-react";
 import * as api from "../api/client";
-import { useAuth } from "../context/AuthContext";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
+import { FootfallDetail, SecurityDetail, VisitorsDetail, WorkforceDetail } from "../components/dashboard/DashboardDetails";
 
-// Business dashboard: the day at a glance for the owner, from the same
-// backend calculations the feature pages use (backend/app/insights.py
-// business_overview). Every number is recorded data; "—" means not available
-// (feature off, live-only figure on a past date, or nothing configured).
+// Business dashboard: four questions, four cards - is my workforce in, are
+// visitors handled well, is activity and staffing normal, is anything unsafe -
+// each opening its detailed view. Every number comes from the same backend
+// calculations the feature pages use (insights.business_overview); "—" means
+// not available (feature off, a live-only figure on a past date, or not set up).
 
 function todayIso() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+export const mins = (s) => (s === null || s === undefined ? "—" : s < 60 ? "<1 min" : `${Math.round(s / 60)} min`);
 
-function minutes(seconds) {
-  if (seconds == null) return "—";
-  const m = Math.round(seconds / 60);
-  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
-}
-
-function hourShort(h) {
-  const suffix = h < 12 ? "am" : "pm";
-  return `${h % 12 === 0 ? 12 : h % 12}${suffix}`;
-}
-
-const TONE = { ok: "text-success-600", warn: "text-warning-600", bad: "text-danger-500" };
-const DOT = { ok: "bg-success-500", warn: "bg-warning-500", bad: "bg-danger-500" };
-
-function KpiCard({ label, value, sub, onClick, tone }) {
-  return (
-    <button type="button" onClick={onClick} className="stat-card text-left hover:ring-2 hover:ring-brand-500/30 transition-shadow w-full">
-      <p className={`text-2xl font-semibold leading-none ${tone === "bad" ? "text-danger-500" : "text-ink-900"}`}>{value ?? "—"}</p>
-      <p className="text-sm text-slate-500 mt-2">{label}</p>
-      {sub ? <p className="text-xs mt-2 text-slate-400">{sub}</p> : null}
-    </button>
-  );
-}
-
-function Section({ icon: Icon, title, action, children }) {
-  return (
-    <div className="card p-5">
-      <div className="flex items-center justify-between gap-2 mb-4">
-        <h3 className="font-semibold text-ink-900 flex items-center gap-2">
-          {Icon && <Icon size={16} className="text-brand-600" />} {title}
-        </h3>
-        {action}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Figures({ items }) {
-  return (
-    <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 mb-4">
-      {items.map(([label, value, tone]) => (
-        <div key={label}>
-          <dt className="text-xs text-slate-500">{label}</dt>
-          <dd className={`text-lg font-semibold ${tone === "bad" && value && value !== "0" ? "text-danger-500" : "text-ink-900"}`}>{value ?? "—"}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-function HourBars({ data, dataKey, name }) {
-  if (!data?.length) return <p className="text-xs text-slate-400">No arrivals recorded.</p>;
-  const rows = data.map((r) => ({ ...r, label: hourShort(r.hour) }));
-  return (
-    <div className="h-40">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={rows}>
-          <CartesianGrid vertical={false} stroke="#eceef4" />
-          <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
-          <YAxis hide allowDecimals={false} />
-          <Tooltip />
-          <Bar dataKey={dataKey} name={name} fill="var(--color-brand-500)" radius={[4, 4, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function Link({ to, children }) {
-  const navigate = useNavigate();
-  return (
-    <button type="button" onClick={() => navigate(to)} className="text-xs text-brand-600 hover:underline">
-      {children}
-    </button>
-  );
-}
+const CARD_TONE = {
+  indigo: { icon: "bg-indigo-50 text-indigo-600", bar: "from-indigo-500/70" },
+  violet: { icon: "bg-violet-50 text-violet-600", bar: "from-violet-500/70" },
+  emerald: { icon: "bg-emerald-50 text-emerald-600", bar: "from-emerald-500/70" },
+  rose: { icon: "bg-rose-50 text-rose-600", bar: "from-rose-500/70" },
+};
+const DOT = { ok: "bg-emerald-500", warn: "bg-amber-500", bad: "bg-rose-500", none: "bg-slate-300" };
 
 export default function Dashboard() {
-  const { user } = useAuth();
-  const navigate = useNavigate();
   const [date, setDate] = useState(todayIso);
-  const [stats, setStats] = useState(null);
+  const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [open, setOpen] = useState(null);   // workforce | visitors | footfall | security
+
+  const load = useCallback(() => {
+    api
+      .getDashboardStats(date)
+      .then((d) => {
+        setData(d);
+        setError("");
+      })
+      .catch((e) => setError(e.message || "Could not load the dashboard"));
+  }, [date]);
 
   useEffect(() => {
-    let alive = true;
-    const load = () =>
-      api
-        .getDashboardStats(date)
-        .then((s) => {
-          if (!alive) return;
-          setStats(s);
-          setError("");
-        })
-        .catch(() => alive && setError("Couldn't load the dashboard. Check the backend is running on port 8822."));
+    setData(null);
     load();
     // Live figures refresh for today; a past date doesn't change.
     const t = date === todayIso() ? setVisibleInterval(load, 30000) : null;
-    return () => {
-      alive = false;
-      if (t) clearVisibleInterval(t);
-    };
-  }, [date]);
+    return () => t && clearVisibleInterval(t);
+  }, [date, load]);
 
-  if (error && !stats) return <p className="text-sm text-danger-500">{error}</p>;
-  if (!stats) return <p className="text-sm text-slate-400">Loading dashboard…</p>;
+  const b = data?.business;
+  const isToday = date === todayIso();
+  const w = b?.workforce;
+  const v = b?.visitors;
+  const f = b?.footfall;
+  const s = b?.security;
+  const short = b?.understaffed;
+  const staffNow = b?.staff_now?.count ?? null;
+  const waitingOver = v?.waiting?.filter((x) => x.over).length || 0;
 
-  const b = stats.business || {};
-  const a = b.attendance;
-  const v = b.visitors;
-  const f = b.footfall;
-  const st = b.staff;
-  const isToday = b.is_today ?? date === todayIso();
-  const q = `?date=${date}`;
-  const gaps = b.staffing_gaps;
-
-  const kpis = [
-    a && { label: "Employees present", value: `${a.present} / ${a.total}`, sub: `${a.attendance_pct}% · ${a.absent} absent`, to: `/attendance${q}` },
-    a && { label: "Late arrivals", value: String(a.late), sub: `after ${a.late_after}`, to: `/attendance${q}`, tone: a.late ? "bad" : undefined },
-    v && { label: "Visitors", value: String(v.visitors), sub: isToday ? `${v.waiting_now} waiting now` : "that day", to: "/visitors" },
-    v && { label: "Average visitor wait", value: v.visitors ? minutes(v.average_wait_seconds) : "—", sub: `${v.over_threshold} over ${v.threshold_minutes} min`, to: "/visitors" },
-    f && {
-      label: "Footfall (inward entries)",
-      value: String(f.entries),
-      sub: f.change_pct == null ? "no data the day before" : `${f.change_pct >= 0 ? "+" : ""}${f.change_pct}% vs day before`,
-      to: "/visitors?tab=footfall",
-    },
-    f && { label: "Employee vs visitor traffic", value: `${f.employee_entries} / ${f.visitor_entries}`, sub: "employees / visitors", to: "/visitors?tab=footfall" },
-    st && {
-      label: isToday ? "Current staff count" : "Peak staff inside",
-      value: isToday ? String(st.inside_now) : String(st.peak_inside),
-      sub: `${st.entries} in · ${st.exits} out`,
-      to: "/staff",
+  const cards = [
+    {
+      key: "workforce", title: "Workforce", icon: UserCheck, tone: "indigo", available: !!w,
+      primary: w ? `${w.present}/${w.total}` : "—", primaryLabel: "employees present", delta: w?.vs_previous, better: "up",
+      rows: w ? [
+        { label: "Absent", value: w.absent, tone: w.absent ? "bad" : "ok" },
+        { label: "Late arrivals", value: w.late, tone: w.late ? "warn" : "ok" },
+        { label: "Attendance", value: `${w.attendance_pct}%`, tone: w.attendance_pct >= 90 ? "ok" : w.attendance_pct >= 75 ? "warn" : "bad" },
+      ] : [],
     },
     {
-      label: "Areas with staffing gaps",
-      value: gaps == null ? "—" : String(gaps.length),
-      sub: gaps == null ? "live figure (today only)" : gaps.length ? gaps[0].area : "every monitored area covered",
-      to: "/visitors",
-      tone: gaps?.length ? "bad" : undefined,
+      key: "visitors", title: "Visitor Management", icon: Users, tone: "violet", available: !!v,
+      primary: v ? v.visitors : "—", primaryLabel: "visitors today", delta: v?.vs_previous, better: null,
+      rows: v ? [
+        { label: "Inside now", value: v.inside_now ?? "—", tone: "none" },
+        { label: "Waiting", value: v.waiting_now ?? "—", tone: waitingOver ? "warn" : "ok", hint: waitingOver ? `${waitingOver} over ${v.waiting_threshold_minutes} min` : null },
+        { label: "Avg waiting time", value: mins(v.average_waiting_seconds), tone: "none" },
+      ] : [],
     },
-  ].filter(Boolean);
+    {
+      key: "footfall", title: "Footfall & Staffing", icon: Footprints, tone: "emerald", available: !!f || !!b?.areas,
+      primary: f ? f.entries : "—", primaryLabel: "entries today", delta: f?.vs_previous, better: null,
+      rows: [
+        { label: "Employees / visitors", value: f ? `${f.employee_entries} / ${f.visitor_entries}` : "—", tone: "none" },
+        { label: "Staff seen now", value: staffNow ?? "—", tone: "none" },
+        { label: "Short-staffed areas", value: short ? short.length : "—", tone: short ? (short.length ? "bad" : "ok") : "none" },
+      ],
+    },
+    {
+      key: "security", title: "Security & Safety", icon: ShieldAlert, tone: "rose", available: !!s,
+      primary: s ? s.active : "—", primaryLabel: "active alerts", delta: s ? { ...s.vs_previous, label: "raised" } : null, better: "down",
+      rows: s ? [
+        { label: "Unknown persons", value: s.unknown_persons, tone: s.unknown_persons ? "warn" : "ok" },
+        { label: "Intrusion alerts", value: s.intrusion ?? "Not set up", tone: "none" },
+        { label: "Restricted-area violations", value: s.restricted_violations, tone: s.restricted_violations ? "bad" : "ok" },
+      ] : [],
+    },
+  ];
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold text-ink-900">Welcome, {user?.name?.split(" ")[0] || "there"}</h2>
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="mr-auto">
+          <h2 className="text-lg font-semibold text-ink-900">Dashboard</h2>
           <p className="text-sm text-slate-500">
             {new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
-            {isToday ? " · live" : ""}
+            {!isToday && " · past day: live figures (inside now, waiting, staffing) are not shown"}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <CalendarDays size={16} className="text-slate-400" />
+        <label className="flex items-center gap-2 text-sm text-slate-500">
+          <CalendarDays size={16} />
           <input type="date" value={date} max={todayIso()} onChange={(e) => e.target.value && setDate(e.target.value)} className="input-field !w-auto text-sm" />
-          {!isToday && (
-            <button type="button" className="btn-secondary text-sm" onClick={() => setDate(todayIso())}>
-              Today
-            </button>
-          )}
-        </div>
+        </label>
+        {!isToday && (
+          <button type="button" className="btn-secondary text-sm" onClick={() => setDate(todayIso())}>
+            Today
+          </button>
+        )}
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {kpis.map((k) => (
-          <KpiCard key={k.label} {...k} onClick={() => navigate(k.to)} />
+      {error && <p className="text-sm text-danger-500">{error}</p>}
+
+      {/* The four questions. One row on desktop; swipe sideways on a phone. */}
+      <div className="flex lg:grid lg:grid-cols-4 gap-4 overflow-x-auto lg:overflow-visible snap-x snap-mandatory pb-1 -mx-1 px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {cards.map((c) => (
+          <KpiCard key={c.key} card={c} loading={!b} onOpen={() => setOpen(c.key)} />
         ))}
       </div>
 
-      {b.summary?.length > 0 && (
-        <Section icon={ClipboardList} title="Daily management summary">
+      {b && <ActivityOverview f={f} />}
+
+      {b && (
+        <section className="bg-white rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.05)] p-5">
+          <h3 className="text-sm font-semibold text-ink-900 flex items-center gap-2 mb-3">
+            <ClipboardList size={16} className="text-brand-600" /> Daily management summary
+          </h3>
           <ul className="space-y-2">
-            {b.summary.map((s, i) => (
-              <li key={i}>
-                <button type="button" onClick={() => navigate(s.link)} className="w-full text-left flex items-start gap-3 border border-[#f1f2f7] rounded-xl px-4 py-2.5 hover:bg-slate-50">
-                  <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${DOT[s.tone] || DOT.ok}`} />
-                  <span className="text-sm text-slate-700">
-                    <span className={`font-medium ${TONE[s.tone] || ""}`}>{s.area}: </span>
-                    {s.text}
-                  </span>
-                </button>
+            {b.summary.map((x, i) => (
+              <li key={i} className="flex items-start gap-3 text-sm">
+                <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${DOT[x.tone] || DOT.none}`} />
+                <span className="w-24 shrink-0 text-slate-500">{x.area}</span>
+                <span className="text-ink-900 flex-1">{x.text}</span>
+                <RouterLink to={x.link} className="text-xs text-brand-600 shrink-0 hover:underline">Open</RouterLink>
               </li>
             ))}
           </ul>
-        </Section>
+          {data?.cameras && (
+            <p className="text-[11px] text-slate-400 mt-4">
+              Cameras: {data.cameras.online} of {data.cameras.total} online{data.cameras.offline ? `, ${data.cameras.offline} offline` : ""}.
+            </p>
+          )}
+        </section>
       )}
 
-      <div className="grid lg:grid-cols-2 gap-5">
-        {a && (
-          <Section icon={UserCheck} title="Attendance overview" action={<Link to={`/attendance${q}`}>Open attendance</Link>}>
-            <Figures
-              items={[
-                ["Present", String(a.present)],
-                ["Absent", String(a.absent)],
-                ["Late", String(a.late), "bad"],
-                [`Late ${a.late_repeat_threshold}+ times (30 days)`, String(a.late_repeat), "bad"],
-                [`Early departures (before ${a.shift_end})`, String(a.early_departures), "bad"],
-                ["Overtime", a.overtime ? `${a.overtime} · ${minutes(a.overtime_minutes * 60)}` : "0"],
-              ]}
-            />
-            <p className="text-xs font-medium text-slate-500 mb-2">Policy exceptions</p>
-            {a.exceptions.length === 0 ? (
-              <p className="text-sm text-slate-400">No attendance exceptions.</p>
-            ) : (
-              <ul className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                {a.exceptions.map((e) => (
-                  <li key={e.employee_id} className="text-sm flex flex-wrap gap-x-2">
-                    <span className="font-medium text-ink-900">{e.name}</span>
-                    <span className="text-slate-500">{e.reasons.join(" · ")}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Section>
-        )}
-
-        {v && (
-          <Section icon={Users} title="Visitor overview" action={<Link to="/visitors">Open visitor management</Link>}>
-            <Figures
-              items={[
-                ["Visitors", String(v.visitors)],
-                ["Average wait", v.visitors ? minutes(v.average_wait_seconds) : "—"],
-                [`Waiting over ${v.threshold_minutes} min`, String(v.over_threshold), "bad"],
-                ["Peak visitor hour", v.peak_label || "—"],
-                ["Visitor alerts", String(v.alerts)],
-                ["Repeat visitors", "Not tracked"],
-              ]}
-            />
-            <HourBars data={v.hourly} dataKey="visitors" name="Visitors" />
-            <p className="text-[11px] text-slate-400 mt-2">
-              Repeat visitors can't be told apart: visitors aren't identified, only employees are. Returning people at the gates are on Footfall.
-            </p>
-          </Section>
-        )}
-
-        {f && (
-          <Section icon={Footprints} title="Footfall analytics" action={<Link to="/visitors?tab=footfall">Open footfall</Link>}>
-            <Figures
-              items={[
-                ["Inward entries", String(f.entries)],
-                ["Outward exits", String(f.exits)],
-                ["Employee entries", String(f.employee_entries)],
-                ["Visitor entries", String(f.visitor_entries)],
-                ["Peak entry hour", f.peak_label || "—"],
-                ["Day before", String(f.previous_day_entries)],
-              ]}
-            />
-            <HourBars data={f.hourly} dataKey="entries" name="Entries" />
-            {f.gates_without_entry_line > 0 && (
-              <p className="text-[11px] text-warning-600 mt-2">
-                {f.gates_without_entry_line} gate(s) have no entry line: they count everyone in their area and can't count exits. Draw the line on Footfall.
-              </p>
-            )}
-          </Section>
-        )}
-
-        <Section icon={Building2} title="Staff & zone monitoring" action={<Link to="/staff">Open staff counting</Link>}>
-          {st ? (
-            <Figures
-              items={[
-                ["Inside now", isToday ? String(st.inside_now) : "—"],
-                ["Employees inside", isToday ? String(st.employees_inside) : "—"],
-                ["Other persons", isToday ? String(st.others_inside) : "—"],
-                ["Peak inside", String(st.peak_inside)],
-                ["Entries", String(st.entries)],
-                ["Exits", String(st.exits)],
-              ]}
-            />
-          ) : (
-            <p className="text-sm text-slate-400 mb-4">Staff counting is not running.</p>
-          )}
-          <p className="text-xs font-medium text-slate-500 mb-2">Zone-wise occupancy {isToday ? "(live)" : ""}</p>
-          {!isToday ? (
-            <p className="text-sm text-slate-400 mb-3">Zone occupancy is live only. Pick today to see it.</p>
-          ) : b.zones?.length ? (
-            <table className="data-table mb-3">
-              <thead>
-                <tr>
-                  <th>Area</th>
-                  <th>Visitors</th>
-                  <th>Employees</th>
-                  <th>Staffing</th>
-                </tr>
-              </thead>
-              <tbody>
-                {b.zones.map((z) => {
-                  const gap = z.visitors > 0 && z.employees === 0;
-                  return (
-                    <tr key={z.camera_id}>
-                      <td>{z.area}</td>
-                      <td>{z.visitors}</td>
-                      <td>{z.employees}</td>
-                      <td>
-                        <span className={`badge ${gap ? "badge-danger" : "badge-success"}`}>{gap ? "No employee present" : z.online ? "Covered" : "Camera offline"}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : (
-            <p className="text-sm text-slate-400 mb-3">No monitored areas. Mark a visitor area on Visitor Management.</p>
-          )}
-          {a && (
-            <>
-              <p className="text-xs font-medium text-slate-500 mb-2">Employee presence (where last seen)</p>
-              {a.presence.length === 0 ? (
-                <p className="text-sm text-slate-400">No employees seen.</p>
-              ) : (
-                <ul className="text-sm space-y-1 max-h-40 overflow-y-auto pr-1">
-                  {a.presence.map((p) => (
-                    <li key={p.name} className="flex justify-between gap-2">
-                      <span className="text-ink-900">{p.name}</span>
-                      <span className="text-slate-500">
-                        {p.camera} · {p.last_seen}
-                        {p.status === "On site" ? " · on site" : ""}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
-          )}
-        </Section>
-      </div>
-
-      <div className="grid md:grid-cols-2 gap-5">
-        <Section icon={Siren} title={`Important events${b.open_alerts ? ` (${b.open_alerts} open)` : ""}`} action={<Link to="/alerts">Open alerts</Link>}>
-          {!b.events?.length ? (
-            <p className="text-sm text-slate-500">No open alerts for this day.</p>
-          ) : (
-            <div className="space-y-2">
-              {b.events.map((e) => (
-                <button key={e.id} type="button" onClick={() => navigate("/alerts")} className="w-full text-left flex items-center justify-between border border-[#f1f2f7] rounded-xl px-4 py-2.5 hover:bg-slate-50">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-ink-900 truncate">{e.event}</p>
-                    <p className="text-xs text-slate-500 truncate">
-                      {e.camera} · {e.time}
-                      {e.message ? ` · ${e.message}` : ""}
-                    </p>
-                  </div>
-                  <span className={`badge shrink-0 ${e.severity === "Critical" || e.severity === "High" ? "badge-danger" : "badge-warning"}`}>{e.severity}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </Section>
-
-        <Section icon={AlertTriangle} title={`System health · ${stats.admin.camerasOnline.value} cameras online`}>
-          <div className="space-y-3">
-            {stats.needsAttention.length === 0 && <p className="text-sm text-slate-500">Nothing needs attention right now.</p>}
-            {stats.needsAttention.map((item, i) => (
-              <div key={i} className="flex items-center justify-between border border-[#f1f2f7] rounded-xl px-4 py-3">
-                <div>
-                  <p className="text-sm font-medium text-ink-900">{item.label}</p>
-                  {item.detail && <p className="text-xs text-slate-500 mt-0.5">{item.detail}</p>}
-                </div>
-                <span className={`badge ${item.tag === "Critical" ? "badge-danger" : "badge-warning"}`}>{item.tag}</span>
-              </div>
-            ))}
-          </div>
-          {stats.aiInsights?.length > 0 && (
-            <ul className="space-y-2 mt-4">
-              {stats.aiInsights.map((line, i) => (
-                <li key={i} className="text-xs text-slate-600 flex gap-2">
-                  <Sparkles size={13} className="text-brand-500 shrink-0 mt-0.5" /> {line}
-                </li>
-              ))}
-            </ul>
-          )}
-        </Section>
-      </div>
+      {b && open === "workforce" && <WorkforceDetail b={b} date={date} onClose={() => setOpen(null)} />}
+      {b && open === "visitors" && <VisitorsDetail b={b} onClose={() => setOpen(null)} />}
+      {b && open === "footfall" && <FootfallDetail b={b} onClose={() => setOpen(null)} onChanged={load} />}
+      {b && open === "security" && <SecurityDetail b={b} onClose={() => setOpen(null)} />}
     </div>
+  );
+}
+
+function KpiCard({ card, loading, onOpen }) {
+  const t = CARD_TONE[card.tone];
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group relative text-left bg-white rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.06)] hover:shadow-[0_6px_20px_rgba(15,23,42,0.08)] hover:-translate-y-0.5 transition p-5 overflow-hidden min-w-[82%] sm:min-w-[46%] lg:min-w-0 snap-start focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+    >
+      <span className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${t.bar} to-transparent`} />
+      <div className="flex items-center gap-2.5">
+        <span className={`w-9 h-9 rounded-xl grid place-items-center ${t.icon}`}>
+          <card.icon size={18} />
+        </span>
+        <h3 className="text-sm font-semibold text-ink-900 flex-1">{card.title}</h3>
+        <span className="w-7 h-7 rounded-full grid place-items-center bg-slate-50 text-slate-400 group-hover:bg-brand-50 group-hover:text-brand-600 transition" aria-hidden="true">
+          <ChevronRight size={15} />
+        </span>
+      </div>
+      <div className="mt-4 flex items-end gap-2">
+        <span className="text-[34px] leading-none font-light tracking-tight text-ink-900 tabular-nums">{loading ? "…" : card.primary}</span>
+        <Delta delta={card.delta} better={card.better} />
+      </div>
+      <p className="text-xs text-slate-500 mt-1">{card.primaryLabel}</p>
+      {!loading && !card.available ? (
+        <p className="text-xs text-slate-400 mt-4">Not set up in this installation.</p>
+      ) : (
+        <ul className="mt-4 space-y-2 border-t border-slate-100 pt-3">
+          {card.rows.map((r) => (
+            <li key={r.label} className="flex items-center gap-2 text-xs">
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${DOT[r.tone] || DOT.none}`} />
+              <span className="text-slate-500 flex-1 min-w-0 truncate">
+                {r.label}
+                {r.hint && <span className="text-amber-600"> · {r.hint}</span>}
+              </span>
+              <span className="font-semibold text-ink-900 tabular-nums">{loading ? "…" : r.value}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </button>
+  );
+}
+
+// Today vs the previous day, only when both are recorded.
+function Delta({ delta, better }) {
+  if (!delta || delta.change === undefined || delta.change === null) return null;
+  const c = delta.change;
+  const Icon = c > 0 ? ArrowUpRight : c < 0 ? ArrowDownRight : Minus;
+  const good = better ? (better === "up" ? c > 0 : c < 0) : null;
+  const cls = c === 0 || good === null ? "bg-slate-100 text-slate-600" : good ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-600";
+  return (
+    <span className={`mb-1 inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${cls}`} title={`${delta.label ? `${delta.label}: ` : ""}previous day ${delta.previous}`}>
+      <Icon size={12} />
+      {c > 0 ? `+${c}` : c} vs yesterday
+    </span>
+  );
+}
+
+function ActivityOverview({ f }) {
+  return (
+    <section className="bg-white rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.05)] p-5">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <h3 className="text-sm font-semibold text-ink-900 flex items-center gap-2 mr-auto">
+          <TrendingUp size={16} className="text-brand-600" /> Overview
+        </h3>
+        {f?.peak_label && <span className="text-xs text-slate-500">Peak hour: <b className="text-ink-900">{f.peak_label}</b></span>}
+      </div>
+      {!f ? (
+        <p className="text-sm text-slate-400 py-10 text-center">Footfall is not set up, so there is no activity data.</p>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+          <div className="lg:col-span-3">
+            <p className="text-xs text-slate-500 mb-1">Entries by hour</p>
+            <div className="h-56">
+              {f.hourly.length === 0 ? (
+                <p className="text-sm text-slate-400 pt-20 text-center">Nobody counted on this day.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={f.hourly}>
+                    <CartesianGrid vertical={false} stroke="#eef0f5" />
+                    <XAxis dataKey="hour" tickFormatter={(h) => `${h % 12 || 12}${h < 12 ? "a" : "p"}`} tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} width={26} />
+                    <Tooltip labelFormatter={(h) => f.hourly.find((x) => x.hour === h)?.label} contentStyle={{ fontSize: 12, borderRadius: 8 }} cursor={{ fill: "#f8fafc" }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <Bar dataKey="employees" name="Employees" stackId="a" fill="#818cf8" maxBarSize={28} />
+                    <Bar dataKey="visitors" name="Visitors / others" stackId="a" fill="#34d399" radius={[4, 4, 0, 0]} maxBarSize={28} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+          <div className="lg:col-span-2">
+            <p className="text-xs text-slate-500 mb-1">Employee vs visitor traffic, last 7 days</p>
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={f.trend}>
+                  <CartesianGrid vertical={false} stroke="#eef0f5" />
+                  <XAxis dataKey="day" tickFormatter={(d) => new Date(`${d}T12:00:00`).toLocaleDateString([], { weekday: "short" })} tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
+                  <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} width={26} />
+                  <Tooltip labelFormatter={(d) => new Date(`${d}T12:00:00`).toLocaleDateString([], { day: "numeric", month: "short" })} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Line type="monotone" dataKey="employees" name="Employees" stroke="#818cf8" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="visitors" name="Visitors / others" stroke="#34d399" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

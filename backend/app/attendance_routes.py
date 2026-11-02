@@ -82,6 +82,25 @@ def set_main_hall(body: MainHallIn, principal: dict = Depends(auth.require_admin
         _bad(e)
 
 
+@router.get("/staffing")
+def staffing(_: dict = Depends(auth.require_admin)):
+    """Employees recognised in each mapped area now, against each area's minimum."""
+    return {"areas": presence.area_staffing(), "targets": presence.get_staffing_targets()}
+
+
+class TargetsIn(BaseModel):
+    targets: dict[str, int]
+
+
+@router.put("/staffing/targets")
+def set_staffing_targets(body: TargetsIn, principal: dict = Depends(auth.require_admin)):
+    try:
+        presence.set_staffing_targets(body.targets, principal)
+    except ValueError as e:
+        _bad(e)
+    return {"areas": presence.area_staffing(), "targets": presence.get_staffing_targets()}
+
+
 @router.get("/cameras/locations")
 def camera_locations(_: dict = Depends(auth.require_admin)):
     """Every camera with its mapped location (from configuration) and stream availability."""

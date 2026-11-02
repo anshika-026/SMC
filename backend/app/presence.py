@@ -232,6 +232,79 @@ def _recommend(evidence: list[dict], directory: list[dict], gate_cams: set[int],
             "note": None, "evidence": None, "alternatives": [], "gate_camera": False}
 
 
+# --------------------------------------------------------------------------- area staffing
+
+def get_staffing_targets() -> dict[str, int]:
+    """Minimum employees an admin wants in each mapped area (zone name -> n)."""
+    with _conn() as conn:
+        r = conn.execute("SELECT value FROM presence_settings WHERE key = 'staffing_targets'").fetchone()
+    return {k: int(v) for k, v in (json.loads(r["value"]) if r and r["value"] else {}).items() if int(v) > 0}
+
+
+def set_staffing_targets(targets: dict, actor: dict | None = None) -> dict[str, int]:
+    clean = {}
+    for zone, n in (targets or {}).items():
+        zone = (zone or "").strip()[:60]
+        n = int(n or 0)
+        if not zone or n < 0 or n > 500:
+            raise ValueError("Each area needs a name and a minimum between 0 and 500.")
+        if n:
+            clean[zone] = n
+    with _conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO presence_settings (key, value, updated_at, updated_by) VALUES ('staffing_targets', ?, ?, ?)",
+                     (json.dumps(clean), time.time(), audit._actor(actor)))
+    audit.record("presence.staffing_targets", actor, None, targets=clean)
+    return clean
+
+
+def staff_seen_now(now: float | None = None) -> int:
+    """Employees recognised by face on any camera except the gate camera
+    within the last SEEN_INSIDE_MINUTES: the people actually seen inside."""
+    now = now if now is not None else time.time()
+    gate = workforce._gate_cameras()
+    with _conn() as conn:
+        try:
+            rows = conn.execute("SELECT DISTINCT employee_id, camera_id FROM face_recognition_events WHERE last_seen >= ?",
+                                (now - SEEN_INSIDE_MINUTES * 60,)).fetchall()
+        except sqlite3.OperationalError:
+            return 0
+    return len({r["employee_id"] for r in rows if r["camera_id"] not in gate})
+
+
+def area_staffing(now: float | None = None) -> list[dict]:
+    """Employees in each mapped area right now: recognised by face on that
+    area's cameras within the last SEEN_INSIDE_MINUTES (the same window
+    attendance uses for "inside"), against the area's minimum if one is set.
+    Recognition only names employees; unrecognised people are not counted."""
+    now = now if now is not None else time.time()
+    zones = camera_zones()
+    by_zone: dict[str, list[int]] = {}
+    for cid, z in zones.items():
+        by_zone.setdefault(z["zone"], []).append(cid)
+    targets = get_staffing_targets()
+    for zone in targets:
+        by_zone.setdefault(zone, [])
+    cams = {c["id"]: c["name"] for c in camera_db.list_cameras()}
+    since = now - SEEN_INSIDE_MINUTES * 60
+    seen: dict[int, set] = {}
+    with _conn() as conn:
+        try:
+            for r in conn.execute("SELECT camera_id, employee_id FROM face_recognition_events WHERE last_seen >= ?", (since,)):
+                seen.setdefault(r["camera_id"], set()).add(r["employee_id"])
+        except sqlite3.OperationalError:
+            pass
+    out = []
+    for zone, cids in sorted(by_zone.items()):
+        emps = set().union(*(seen.get(c, set()) for c in cids)) if cids else set()
+        target = targets.get(zone)
+        out.append({
+            "area": zone, "cameras": [cams.get(c, f"Camera {c}") for c in cids], "employees": len(emps),
+            "names": sorted((employee_directory.get_display(e)[0] or e) for e in emps),
+            "target": target, "short_by": max(0, target - len(emps)) if target else 0,
+        })
+    return out
+
+
 # --------------------------------------------------------------------------- evidence
 
 def _live_tracks(employee_id: str) -> list[dict]:

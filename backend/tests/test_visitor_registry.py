@@ -450,3 +450,10 @@ def test_live_capture_runs_in_background_and_reports_outcome(vr, monkeypatch):
     target(*args)
     v = reg.get_visit(v["id"])
     assert v["snapshot_status"] == "captured" and "No clear" in v["snapshot_message"]
+
+
+@pytest.mark.parametrize("day", ["2026-11-15", "2026-02-10", "2028-02-29", "2026-12-31"])
+def test_kpis_work_in_months_shorter_than_31_days(vr, day):
+    register(visit_date=day)
+    k = reg.kpis(day, now=at(day, 18))
+    assert k["visitors_today"] == 1 and k["visits_this_month"] == 1

@@ -65,6 +65,7 @@ def get_settings():
 class SettingsIn(BaseModel):
     media_retention_days: int | None = None
     long_stay_minutes: int | None = None
+    waiting_alert_minutes: int | None = None
     default_gate_camera_id: int | None = None
     notice_text: str | None = None
 

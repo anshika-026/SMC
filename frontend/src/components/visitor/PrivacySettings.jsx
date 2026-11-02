@@ -16,6 +16,7 @@ export default function PrivacySettings({ open, onClose, settings, onSaved }) {
     if (!open || !settings) return;
     setForm({
       media_retention_days: settings.media_retention_days, long_stay_minutes: settings.long_stay_minutes,
+      waiting_alert_minutes: settings.waiting_alert_minutes ?? 15,
       default_gate_camera_id: settings.default_gate_camera_id ?? "", notice_text: settings.notice_text,
     });
     setError("");
@@ -27,6 +28,7 @@ export default function PrivacySettings({ open, onClose, settings, onSaved }) {
     try {
       const s = await api.vr.saveSettings({
         ...form, media_retention_days: Number(form.media_retention_days), long_stay_minutes: Number(form.long_stay_minutes),
+        waiting_alert_minutes: Number(form.waiting_alert_minutes),
         default_gate_camera_id: form.default_gate_camera_id === "" ? null : Number(form.default_gate_camera_id),
       });
       onSaved(s);
@@ -38,7 +40,7 @@ export default function PrivacySettings({ open, onClose, settings, onSaved }) {
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   return (
-    <Modal open={open} onClose={onClose} title="Visitor privacy & retention" width="max-w-lg">
+    <Modal open={open} onClose={onClose} title="Visitor settings, privacy & retention" width="max-w-lg">
       {form && (
         <form onSubmit={save} className="space-y-3 text-sm">
           <Field label="Visitor notice (shown at registration)" hint="{days} is replaced with the retention period.">
@@ -52,6 +54,9 @@ export default function PrivacySettings({ open, onClose, settings, onSaved }) {
               <input type="number" min={10} max={1440} className="input-field" value={form.long_stay_minutes} onChange={set("long_stay_minutes")} />
             </Field>
           </div>
+          <Field label="Visitor waiting alert after (minutes)" hint="Checked-in visitors not yet met by their host for longer than this appear under Attention required on the dashboard.">
+            <input type="number" min={1} max={240} className="input-field" value={form.waiting_alert_minutes} onChange={set("waiting_alert_minutes")} />
+          </Field>
           <Field label="Default entry gate camera">
             <select className="input-field" value={form.default_gate_camera_id} onChange={set("default_gate_camera_id")}>
               <option value="">Not set</option>

@@ -99,13 +99,25 @@ def test_business_overview_handles_an_empty_day(isolated_db, monkeypatch):
     monkeypatch.setattr(alerts, "DB_PATH", isolated_db)
     alerts.init_db()
 
+    from app import presence, visitor_registry, workforce
+    for mod in (presence, visitor_registry, workforce):
+        monkeypatch.setattr(mod, "DB_PATH", isolated_db)
+    workforce.init_db()
+    presence.init_db()
+    visitor_registry.init_db()
+    monkeypatch.setattr(employee_directory, "get_employee", lambda e: employee_directory.EMPLOYEES.get(e))
+
     b = insights.business_overview()
-    assert b["is_today"] and b["attendance"]["present"] == 0 and b["attendance"]["absent"] == 1
-    assert b["visitors"]["visitors"] == 0 and b["visitors"]["repeat_visitors"] is None
-    assert b["footfall"]["entries"] == 0 and b["footfall"]["change_pct"] is None
-    assert b["events"] == [] and isinstance(b["summary"], list) and b["summary"]
+    w = b["workforce"]
+    assert b["is_today"] and w["present"] == 0 and w["total"] == 1 and w["attendance_pct"] == 0
+    assert b["visitors"]["visitors"] == 0 and b["visitors"]["waiting_now"] == 0 and b["visitors"]["average_waiting_seconds"] is None
+    assert b["footfall"]["entries"] == 0 and b["footfall"]["peak_hour"] is None
+    s = b["security"]
+    assert s["active"] == 0 and s["incidents"] == [] and s["intrusion"] is None     # not supported: unavailable, not zero
+    assert isinstance(b["attention"], list) and [x["area"] for x in b["summary"]][-1] == "Security"
 
     past = insights.business_overview(_day(5))
-    assert not past["is_today"] and past["staffing_gaps"] is None and past["zones"] == []
+    assert not past["is_today"] and past["understaffed"] is None and past["areas"] is None
+    assert past["visitors"]["inside_now"] is None and past["visitors"]["waiting_now"] is None
     if past["staff"]:
         assert past["staff"]["inside_now"] is None    # live figures only for today

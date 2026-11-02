@@ -108,42 +108,15 @@ export async function logoutAdmin() {
 // Guests have no backend yet, so that card says so instead of showing
 // sample numbers.
 export async function getDashboardStats(date) {
-  const [summary, footfall, alertSummary, staff] = await Promise.all([
-    request(`/dashboard/summary${date ? `?date=${encodeURIComponent(date)}` : ""}`),
-    getFootfallSummary().catch(() => null),
-    getAlertsSummary().catch(() => null),
-    featureOn("staff_count") ? request("/staff/count").catch(() => null) : null,
-  ]);
-  const gates = footfall?.gates.length ?? 0;
-  const pp = summary.people_present;
-  const diff = pp.value - pp.yesterday;
-  return {
-    admin: {
-      peoplePresent: { value: pp.value, of: pp.of, sub: `${diff >= 0 ? "+" : ""}${diff} vs yesterday` },
-      footfallToday: footfall
-        ? {
-            value: footfall.unique_today,
-            sub: gates ? `across ${gates} gate${gates === 1 ? "" : "s"} · avg ${footfall.avg_per_gate}/gate` : "no gate cameras set",
-          }
-        : { value: "—", sub: "footfall unavailable" },
-      unknownVisitors: { value: summary.unknown_faces, sub: "faces not recognised today" },
-      camerasOnline: {
-        value: `${summary.cameras.online} / ${summary.cameras.total}`,
-        sub: summary.cameras.offline ? `${summary.cameras.offline} offline` : "",
-      },
-      currentStaff: staff
-        ? { value: staff.current_staff_count, sub: `${staff.total_entries_today} in · ${staff.total_exits_today} out today` }
-        : { value: "—", sub: "staff count unavailable" },
-      activeAlerts: alertSummary
-        ? { value: alertSummary.active, sub: alertSummary.acknowledged ? `${alertSummary.acknowledged} acknowledged` : "" }
-        : { value: "—", sub: "alerts unavailable" },
-    },
-    needsAttention: summary.needs_attention,
-    aiInsights: summary.insights,
-    // Business overview for the chosen date (backend insights.business_overview).
-    business: summary.business,
-  };
+  // One call: the business overview for the date (backend insights.business_overview)
+  // plus live camera health. The cards and sections are built from it.
+  const summary = await request(`/dashboard/summary${date ? `?date=${encodeURIComponent(date)}` : ""}`);
+  return { business: summary.business, cameras: summary.cameras };
 }
+export const staffingApi = {
+  get: () => request("/attendance/staffing"),
+  setTargets: (targets) => request("/attendance/staffing/targets", { method: "PUT", body: JSON.stringify({ targets }) }),
+};
 
 // ---- Alerts & Events -----------------------------------------------------
 // Real alerts (backend/app/alerts.py): unknown people at gates, cameras

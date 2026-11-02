@@ -10,11 +10,14 @@ no data behind it comes back as None and the page says so.
 """
 
 import datetime
+import logging
 import sqlite3
 import time
 
 from app import attendance, camera_db, camera_stream, employee_directory
 from app import analytics_settings, config, db
+
+log = logging.getLogger("insights")
 
 DB_PATH = config.DB_PATH
 
@@ -172,180 +175,299 @@ def _hour_label(h: int | None) -> str | None:
     return f"{a}-{b}"
 
 
+def _clock(ts: float | None) -> str | None:
+    return datetime.datetime.fromtimestamp(ts).strftime("%I:%M %p").lstrip("0") if ts else None
+
+
+def _delta(now_v, prev_v):
+    """Today vs the previous day, only when both are known."""
+    if now_v is None or prev_v is None:
+        return None
+    return {"previous": prev_v, "change": now_v - prev_v}
+
+
+def _safe(fn, default=None):
+    try:
+        return fn()
+    except (sqlite3.Error, KeyError, ValueError):
+        log.exception("dashboard: a section could not be built")
+        return default
+
+
+# Alerts that are about security and safety (cameras going offline leave a blind spot).
+SECURITY_EVENTS = {"Unknown Person", "Person", "Restricted area entered", "Camera Offline"}
+
+
 def business_overview(day: str | None = None, now: float | None = None) -> dict:
-    """The business dashboard for one local date (default today), built from
-    the same functions the feature pages use, so the numbers always agree with
-    them. Live figures (staff inside, visitors waiting, staffing gaps) exist
-    only for today; for another date they are None. A feature this deployment
-    doesn't run is None, never zero."""
-    from app import alerts, footfall, visitors
+    """The business dashboard for one local date (default today): four areas -
+    workforce, visitors, footfall & staffing, security - each built from the
+    same functions its feature page uses, so the numbers always agree with
+    those pages. Live figures (inside now, waiting now, staffing) exist only
+    for today and are None for another date. A feature this deployment doesn't
+    run is None, never zero."""
+    from app import alerts, footfall, presence, visitor_registry, visitors, workforce
+    from app.reid import reid_db
     from app.staff import service as staff_service
 
     now = now if now is not None else time.time()
     today = _iso(datetime.date.fromtimestamp(now))
     day = day or today
     is_today = day == today
-    day_start = datetime.datetime.strptime(day, "%Y-%m-%d")
+    day_date = datetime.date.fromisoformat(day)
+    prev_day = _iso(day_date - datetime.timedelta(days=1))
+    day_start = datetime.datetime.combine(day_date, datetime.time())
+    day_end = (day_start + datetime.timedelta(days=1)).timestamp()
     # "now" for a past date is the end of that day, so its numbers are complete.
-    at = now if is_today else (day_start + datetime.timedelta(days=1)).timestamp() - 1
+    at = now if is_today else day_end - 1
 
     face_on = analytics_settings.available("face_recognition")
     footfall_on = analytics_settings.available("footfall")
     visitors_on = analytics_settings.available("visitors")
     staff_on = analytics_settings.available("staff_count")
 
-    # ---- attendance --------------------------------------------------------------
-    attendance_block = None
+    # ---- 1. workforce (the Attendance page's classification) --------------------------
+    workforce_block = None
     if face_on:
-        rep = attendance.day_report(day, now=at)
-        s = rep["stats"]
-        names = {r["employee_id"]: r["name"] for r in rep["rows"]}
+        ov = workforce.overview(day, now=at)
+        rows = ov["rows"]
+        worked = [r for r in rows if r["status"] in workforce.WORKED]
+        prev_rows = _safe(lambda: workforce.overview(prev_day, now=at)["rows"], [])
+        prev_present = sum(1 for r in prev_rows if r["status"] in workforce.WORKED) if prev_rows else None
+        total = len(rows)
         exceptions = []
-        for r in rep["rows"]:
+        for r in rows:
             reasons = []
-            if r["arrival"] == "Late arrival":
-                reasons.append(f"late (in {r['time_in']})")
-            if r["departure"] == "Early departure":
-                reasons.append(f"left early (last seen {r['time_out']})")
-            if r["employee_id"] in rep["late_repeat_ids"]:
-                reasons.append(f"late {s['late_repeat_threshold']}+ times in 30 days")
-            if r["status"] in ("Present", "On site") and r["time_in"] == r["time_out"]:
-                reasons.append("seen only once (no time-out)")
+            if r["late"]:
+                reasons.append(f"late (in {_clock(r['first_in'])})")
+            if r["half_day"]:
+                reasons.append("half day")
+            if r["status"] == workforce.ABSENT:
+                reasons.append("absent")
+            if r["missing_entry"]:
+                reasons.append("seen by face, no gate entry")
+            if r["missing_exit"]:
+                reasons.append("exit not confirmed")
+            if r["long_outside"]:
+                reasons.append("long time outside")
+            if r["over_late_limit"]:
+                reasons.append(f"late {r['month']['late']}x this month")
             if reasons:
-                exceptions.append({"employee_id": r["employee_id"], "name": r["name"], "reasons": reasons})
-        attendance_block = {
-            **{k: s[k] for k in ("present", "total", "absent", "on_leave", "late", "attendance_pct", "late_repeat",
-                                 "late_repeat_threshold", "seen_once", "early_departures", "overtime", "overtime_minutes",
-                                 "shift_end")},
-            "late_after": rep["late_after"],
-            "late_repeat_names": [names.get(e, e) for e in rep["late_repeat_ids"]],
+                exceptions.append({"employee_id": r["employee_id"], "name": r["name"], "status": r["status"], "reasons": reasons})
+        split = _safe(enrollment_split, {"enrolled": 0, "not_enrolled": 0})
+        workforce_block = {
+            "present": len(worked), "total": total,
+            "absent": sum(1 for r in rows if r["status"] == workforce.ABSENT),
+            "late": sum(1 for r in rows if r["late"]),
+            "half_day": sum(1 for r in rows if r["half_day"]),
+            "on_leave": sum(1 for r in rows if r["status"] in (workforce.ON_LEAVE, workforce.WFH)),
+            "attendance_pct": round(len(worked) / total * 100) if total else 0,
+            "vs_previous": _delta(len(worked), prev_present),
+            "repeat_late": [{"name": r["name"], "count": r["month"]["late"]} for r in rows if r["over_late_limit"]],
+            "late_allowance": ov["policy"]["late_allowance_per_month"],
             "exceptions": exceptions,
-            # Where each employee present that day was last seen (by face recognition).
-            "presence": [{"name": r["name"], "camera": r["camera"], "last_seen": r["last_seen"], "status": r["status"]}
-                         for r in rep["rows"] if r["status"] in ("Present", "On site")],
+            "employees": [{"employee_id": r["employee_id"], "name": r["name"], "status": r["status"], "first_in": r["first_in"],
+                           "last_out": r["last_out"], "late": r["late"], "location": r.get("location_detail")} for r in rows],
+            "recognition": {"enrolled": split["enrolled"], "not_enrolled": split["not_enrolled"],
+                            "recognised_today": sum(1 for r in rows if r["first_in"]),
+                            "unknown_faces": unknown_faces_today(at) if is_today else None},
         }
 
-    # ---- visitors --------------------------------------------------------------
+    # ---- 2. visitors (Visitor Management's visit records) ----------------------------
     visitor_block = None
     if visitors_on:
-        k = visitors.kpis(now=now, day=day)
+        k = visitor_registry.kpis(day, now=at)
+        kp = _safe(lambda: visitor_registry.kpis(prev_day, now=at))
+        threshold = visitor_registry.get_settings()["waiting_alert_minutes"]
+        waiting = visitor_registry.waiting_now(now) if is_today else []
+        visits = visitor_registry.list_visits(date_from=day, date_to=day, limit=500, now=at)
+        area = _safe(lambda: visitors.kpis(now=at, day=day), {})
         visitor_block = {
-            "visitors": k["visitors_today"],
-            "average_wait_seconds": k["average_stay_seconds"],
-            "over_threshold": k["long_stays"],
-            "threshold_minutes": k["long_stay_minutes"],
-            "waiting_now": k["waiting_now"] if is_today else None,
-            "alerts": k["alerts"],
-            "employees_seen": k["employees_seen_today"],
-            "hourly": k["hourly"],
-            "peak_hour": k["peak_hour"],
-            "peak_label": _hour_label(k["peak_hour"]),
-            # Visitors aren't identified (no face match for non-employees), so a
-            # returning visitor can't be told from a new one here.
-            "repeat_visitors": None,
+            "visitors": k["visitors_today"], "first_time": k["first_time_today"], "returning": k["repeat_today"],
+            "vs_previous": _delta(k["visitors_today"], kp["visitors_today"] if kp else None),
+            "inside_now": k["inside_now"] if is_today else None,
+            "waiting_now": len(waiting) if is_today else None,
+            "waiting": [{**w, "over": w["waiting_seconds"] >= threshold * 60} for w in waiting],
+            "waiting_threshold_minutes": threshold,
+            "average_waiting_seconds": k["average_waiting_seconds"], "waiting_measured": k["waiting_measured"],
+            "average_duration_seconds": k["average_duration_seconds"],
+            "checked_out": k["checked_out_today"], "pending": k["pending_today"],
+            "visits": [{"id": v["id"], "visitor_name": v["visitor_name"], "visitor_id": v["visitor_id"], "host_name": v["host_name"],
+                        "purpose": v["purpose"], "status": v["status"], "entry_at": v["entry_at"], "exit_at": v["exit_at"],
+                        "meeting_start_at": v["meeting_start_at"], "waiting_seconds": v["waiting_seconds"],
+                        "duration_seconds": v["duration_seconds"], "elapsed_seconds": v["elapsed_seconds"],
+                        "first_visit": v["first_visit"]} for v in visits],
+            "seating_area_alerts": area.get("alerts"),
         }
 
-    # ---- footfall --------------------------------------------------------------
+    # ---- 3. footfall & staffing ---------------------------------------------------------
     footfall_block = None
     if footfall_on:
         f = footfall.service.day_stats(day)
-        prev = f["previous_day_entries"]
-        footfall_block = {**f, "peak_label": _hour_label(f["peak_hour"]),
-                          "change_pct": round((f["entries"] - prev) / prev * 100) if prev else None}
+        emp_hourly = _safe(lambda: _employee_entries_by_hour(day), {})
+        hourly = []
+        for h in f["hourly"]:
+            e = min(emp_hourly.get(h["hour"], 0), h["entries"])
+            hourly.append({"hour": h["hour"], "label": _hour_label(h["hour"]), "entries": h["entries"], "employees": e, "visitors": h["entries"] - e})
+        trend = _safe(lambda: reid_db.footfall_daily(_iso(day_date - datetime.timedelta(days=6)), day), [])
+        footfall_block = {
+            "entries": f["entries"], "exits": f["exits"], "employee_entries": f["employee_entries"], "visitor_entries": f["visitor_entries"],
+            "vs_previous": _delta(f["entries"], f["previous_day_entries"]),
+            "peak_hour": f["peak_hour"], "peak_label": _hour_label(f["peak_hour"]), "hourly": hourly,
+            "trend": [{"day": d["day"], "entries": d["entries"], "employees": d["employee_entries"],
+                       "visitors": d["entries"] - d["employee_entries"]} for d in trend],
+            "gates": [{"name": g["name"], "today": g["unique_today"], "entry_line": bool(g.get("entry_line"))}
+                      for g in footfall.service.summary()["gates"]] if is_today else None,
+            "gates_without_entry_line": f["gates_without_entry_line"],
+        }
 
-    # ---- staff and zones ---------------------------------------------------------
     staff_block = None
     if staff_on and staff_service.service.manager is not None:
         c = staff_service.service.manager.counts(now=at)
-        staff_block = {
-            "inside_now": c["total_persons"] if is_today else None,
-            "employees_inside": c["known_staff"] if is_today else None,
-            "others_inside": c["unknown_persons"] if is_today else None,
-            "entries": c["total_entries_today"],
-            "exits": c["total_exits_today"],
-            "peak_inside": c["peak_inside_today"],
-            "peak_at": c["peak_at"],
-        }
+        staff_block = {"inside_now": c["total_persons"] if is_today else None,
+                       "employees_inside": c["known_staff"] if is_today else None,
+                       "others_inside": c["unknown_persons"] if is_today else None,
+                       "entries": c["total_entries_today"], "exits": c["total_exits_today"],
+                       "peak_inside": c["peak_inside_today"], "peak_at": c["peak_at"]}
 
-    zones, gaps = [], []
-    if visitors_on and is_today:
-        names = {c["id"]: c["name"] for c in camera_db.list_cameras()}
-        for z in visitors.list_zones():
-            if not z["enabled"]:
-                continue
-            st = visitors.service.camera_status(z["camera_id"])
-            row = {"camera_id": z["camera_id"], "area": f"Visitor area - {names.get(z['camera_id'], z['camera_id'])}",
-                   "visitors": st["inside_now"], "employees": st["employees_now"], "unverified": st["unverified_now"],
-                   "online": st["online"]}
-            zones.append(row)
-            # A staffing gap we can actually see: visitors waiting, no employee there.
-            if st["inside_now"] > 0 and st["employees_now"] == 0:
-                gaps.append({"area": row["area"], "detail": f"{st['inside_now']} visitor(s) waiting, no employee in the area"})
+    areas, understaffed, staff_now = None, None, None
+    if is_today:
+        areas = _safe(lambda: presence.area_staffing(now), [])
+        staff_now = {"count": _safe(lambda: presence.staff_seen_now(now), 0), "window_minutes": presence.SEEN_INSIDE_MINUTES}
+        understaffed = [{"area": a["area"], "detail": f"{a['employees']} of {a['target']} required employees", "short_by": a["short_by"]}
+                        for a in areas if a["short_by"]]
+        if visitors_on:
+            names = {c["id"]: c["name"] for c in camera_db.list_cameras()}
+            for z in _safe(visitors.list_zones, []):
+                if not z["enabled"]:
+                    continue
+                st = visitors.service.camera_status(z["camera_id"])
+                if st["inside_now"] > 0 and st["employees_now"] == 0:
+                    understaffed.append({"area": f"Visitor seating - {names.get(z['camera_id'], z['camera_id'])}",
+                                         "detail": f"{st['inside_now']} visitor(s) seated, no employee with them", "short_by": None})
 
-    # ---- important events (alerts raised that day) ------------------------------------
-    day_end = (day_start + datetime.timedelta(days=1)).timestamp()
-    raised = [a for a in alerts.list_alerts("today", limit=500, now=day_start.timestamp() + 1) if a["ts"] < day_end]
+    # ---- 4. security & safety -------------------------------------------------------------
+    # Only security / safety alerts: attendance (late arrival) and operations
+    # (footfall stopped) alerts belong to their own areas, not here.
+    sec = lambda a: a["event"] in SECURITY_EVENTS  # noqa: E731
+    raised = [a for a in alerts.list_alerts("today", limit=1000, now=day_start.timestamp() + 1) if a["ts"] < day_end and sec(a)]
+    prev_raised = _safe(lambda: [a for a in alerts.list_alerts("yesterday", limit=1000, now=day_start.timestamp() + 1) if sec(a)], [])
     open_alerts = [a for a in raised if a["status"] != "Resolved"]
+    unknown = [a for a in raised if a["event"] in ("Unknown Person", "Person")]
+    restricted = [a for a in raised if a["event"] == "Restricted area entered"]
+    restricted_entries = _safe(lambda: _restricted_entries(day_start.timestamp(), day_end), None)
+    seating = _safe(lambda: [e for e in visitors.list_events(limit=200) if day_start.timestamp() <= (e["alert_at"] or e["entered_at"]) < day_end], [])
     sev = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-    events = [{"id": a["id"], "event": "Person" if a["event"] == "Unknown Person" else a["event"], "severity": a["severity"],
-               "camera": a["camera_name"], "time": datetime.datetime.fromtimestamp(a["ts"]).strftime("%I:%M %p").lstrip("0"),
-               "status": a["status"], "message": a["message"]}
-              for a in sorted(open_alerts, key=lambda a: (sev.get(a["severity"], 9), -a["ts"]))[:8]]
+    incidents = [{"kind": "alert", "id": a["id"], "event": "Person" if a["event"] == "Unknown Person" else a["event"],
+                  "severity": a["severity"], "camera": a["camera_name"], "ts": a["ts"], "time": _clock(a["ts"]),
+                  "status": a["status"], "message": a["message"], "picture": a["has_snapshot"]} for a in raised]
+    incidents += [{"kind": "visitor_area", "id": e["id"], "event": "Unknown person in visitor seating", "severity": "Medium",
+                   "camera": e["camera_name"], "ts": e["alert_at"] or e["entered_at"], "time": _clock(e["alert_at"] or e["entered_at"]),
+                   "status": "Left" if e["status"] == "left" else "In area", "message": "", "clip": e["clip_ready"]} for e in seating]
+    incidents.sort(key=lambda x: -x["ts"])
+    security_block = {
+        "active": len(open_alerts),
+        "high_or_critical": sum(1 for a in open_alerts if a["severity"] in ("Critical", "High")),
+        "raised": len(raised), "vs_previous": _delta(len(raised), len(prev_raised) if prev_raised is not None else None),
+        "unknown_persons": len(unknown) + len(seating),
+        "restricted_violations": len(restricted),
+        "restricted_entries": restricted_entries,
+        # This build has no intrusion or loitering detection (removed earlier), so
+        # these are reported as unavailable, never as zero.
+        "intrusion": None, "loitering": None,
+        "open": [{"id": a["id"], "event": "Person" if a["event"] == "Unknown Person" else a["event"], "severity": a["severity"],
+                  "camera": a["camera_name"], "time": _clock(a["ts"]), "status": a["status"], "message": a["message"]}
+                 for a in sorted(open_alerts, key=lambda a: (sev.get(a["severity"], 9), -a["ts"]))[:10]],
+        "incidents": incidents[:25],
+    }
 
-    # ---- the day in sentences -----------------------------------------------------
+    # ---- attention required -------------------------------------------------------------
+    attention = []
+    for u in understaffed or []:
+        attention.append({"kind": "staffing", "tone": "bad", "label": f"Understaffed: {u['area']}", "detail": u["detail"], "link": "/attendance"})
+    if workforce_block and workforce_block["repeat_late"]:
+        rl = workforce_block["repeat_late"]
+        attention.append({"kind": "late", "tone": "warn", "link": "/attendance",
+                          "label": f"{len(rl)} employee{'s' if len(rl) != 1 else ''} late more than {workforce_block['late_allowance']}x this month",
+                          "detail": ", ".join(f"{x['name']} ({x['count']})" for x in rl[:5]) + (" …" if len(rl) > 5 else "")})
+    if visitor_block:
+        over = [w for w in visitor_block["waiting"] if w["over"]]
+        if over:
+            attention.append({"kind": "waiting", "tone": "warn", "link": "/visitors",
+                              "label": f"{len(over)} visitor{'s' if len(over) != 1 else ''} waiting over {visitor_block['waiting_threshold_minutes']} min",
+                              "detail": ", ".join(f"{w['visitor_name']} for {w['host_name']} ({round(w['waiting_seconds'] / 60)} min)" for w in over[:4])})
+    if security_block["active"]:
+        top = security_block["open"][0]
+        attention.append({"kind": "alerts", "tone": "bad" if security_block["high_or_critical"] else "warn", "link": "/alerts",
+                          "label": f"{security_block['active']} unresolved security alert{'s' if security_block['active'] != 1 else ''}"
+                                   + (f" ({security_block['high_or_critical']} high or critical)" if security_block["high_or_critical"] else ""),
+                          "detail": f"Latest top priority: {top['event']} on {top['camera']} at {top['time']}"})
+    if is_today:
+        for c in _safe(lambda: camera_health(now), []):
+            if c["state"] == "offline":
+                attention.append({"kind": "camera", "tone": "bad", "link": "/cameras", "label": f"{c['name']} is offline",
+                                  "detail": "No video from this camera"})
+
+    # ---- the day in sentences -------------------------------------------------------------
     summary = []
-    if attendance_block:
-        a = attendance_block
-        line = f"{a['present']} of {a['total']} employees present ({a['attendance_pct']}%), {a['late']} late"
-        if a["early_departures"]:
-            line += f", {a['early_departures']} left early"
-        if a["overtime"]:
-            line += f", {a['overtime']} worked overtime"
-        summary.append({"area": "Attendance", "text": line + ".", "tone": "warn" if a["exceptions"] else "ok",
-                        "link": "/attendance"})
-        if a["exceptions"]:
-            summary.append({"area": "Attendance", "tone": "warn", "link": "/attendance",
-                            "text": f"{len(a['exceptions'])} attendance exception{'s' if len(a['exceptions']) != 1 else ''}"
-                                    + (f"; {a['late_repeat']} employee(s) late {a['late_repeat_threshold']}+ times this month." if a["late_repeat"] else ".")})
+    if workforce_block:
+        w = workforce_block
+        text = f"{w['present']} of {w['total']} employees came in ({w['attendance_pct']}%): {w['absent']} absent, {w['late']} late"
+        if w["vs_previous"]:
+            d = w["vs_previous"]["change"]
+            text += f"; {abs(d)} {'more' if d >= 0 else 'fewer'} than the day before" if d else "; same as the day before"
+        summary.append({"area": "Workforce", "tone": "warn" if w["absent"] or w["late"] else "ok", "text": text + ".", "link": "/attendance"})
     if visitor_block:
         v = visitor_block
         if v["visitors"]:
-            text = f"{v['visitors']} visitor{'s' if v['visitors'] != 1 else ''}, average wait {round(v['average_wait_seconds'] / 60)} min"
-            if v["over_threshold"]:
-                text += f"; {v['over_threshold']} waited over {v['threshold_minutes']:g} min"
-            summary.append({"area": "Visitors", "text": text + ".", "tone": "warn" if v["over_threshold"] else "ok", "link": "/visitors"})
+            text = f"{v['visitors']} visitor{'s' if v['visitors'] != 1 else ''} ({v['returning']} returning)"
+            if v["average_waiting_seconds"] is not None:
+                text += f", average wait {round(v['average_waiting_seconds'] / 60)} min"
+            if v["inside_now"]:
+                text += f", {v['inside_now']} inside now"
         else:
-            summary.append({"area": "Visitors", "text": "No visitors recorded.", "tone": "ok", "link": "/visitors"})
+            text = "No visitors registered"
+        summary.append({"area": "Visitors", "tone": "warn" if any(x["over"] for x in v["waiting"]) else "ok", "text": text + ".", "link": "/visitors"})
     if footfall_block:
         f = footfall_block
-        text = f"{f['entries']} inward entr{'ies' if f['entries'] != 1 else 'y'}"
-        if f["change_pct"] is not None:
-            text += f" ({'+' if f['change_pct'] >= 0 else ''}{f['change_pct']}% vs the day before)"
+        text = (f"{f['entries']} {'person' if f['entries'] == 1 else 'people'} entered "
+                f"({f['employee_entries']} employee{'s' if f['employee_entries'] != 1 else ''}, {f['visitor_entries']} other{'s' if f['visitor_entries'] != 1 else ''})")
         if f["peak_label"]:
             text += f", busiest {f['peak_label']}"
-        summary.append({"area": "Footfall", "text": text + ".", "tone": "ok", "link": "/footfall"})
-        if f["gates_without_entry_line"]:
-            summary.append({"area": "Footfall", "tone": "warn", "link": "/footfall",
-                            "text": f"{f['gates_without_entry_line']} gate(s) have no entry line, so they also count people outside the gate."})
-    if is_today:
-        summary.append({"area": "Staffing", "link": "/visitors",
-                        "text": "; ".join(g["detail"] + f" ({g['area']})" for g in gaps) + "." if gaps else "No staffing gaps in monitored areas right now.",
-                        "tone": "bad" if gaps else "ok"})
-    if open_alerts:
-        crit = sum(1 for a in open_alerts if a["severity"] in ("Critical", "High"))
-        summary.append({"area": "Alerts", "link": "/alerts", "tone": "bad" if crit else "warn",
-                        "text": f"{len(open_alerts)} open alert{'s' if len(open_alerts) != 1 else ''}" + (f", {crit} high or critical." if crit else ".")})
+        if f["vs_previous"] and f["vs_previous"]["previous"]:
+            pct = round(f["vs_previous"]["change"] / f["vs_previous"]["previous"] * 100)
+            text += f" ({'+' if pct >= 0 else ''}{pct}% vs the day before)"
+        summary.append({"area": "Footfall", "tone": "ok", "text": text + ".", "link": "/visitors?tab=footfall"})
+    if understaffed is not None:
+        summary.append({"area": "Staffing", "tone": "bad" if understaffed else "ok", "link": "/attendance",
+                        "text": "; ".join(f"{u['area']}: {u['detail']}" for u in understaffed) + "." if understaffed
+                        else ("All areas with a minimum have enough employees right now." if any(a["target"] for a in areas or [])
+                              else "No minimum staffing set for any area yet.")})
+    s = security_block
+    summary.append({"area": "Security", "link": "/alerts", "tone": "bad" if s["high_or_critical"] else ("warn" if s["active"] else "ok"),
+                    "text": (f"{s['raised']} alert{'s' if s['raised'] != 1 else ''} raised, {s['active']} still open; "
+                             f"{s['unknown_persons']} unknown-person detection{'s' if s['unknown_persons'] != 1 else ''}, "
+                             f"{s['restricted_violations']} restricted-area violation{'s' if s['restricted_violations'] != 1 else ''}.")})
 
     return {
-        "date": day,
-        "is_today": is_today,
-        "attendance": attendance_block,
-        "visitors": visitor_block,
-        "footfall": footfall_block,
-        "staff": staff_block,
-        "zones": zones,
-        "staffing_gaps": gaps if is_today else None,
-        "events": events,
-        "open_alerts": len(open_alerts),
-        "summary": summary,
+        "date": day, "is_today": is_today,
+        "workforce": workforce_block, "visitors": visitor_block, "footfall": footfall_block, "staff": staff_block,
+        "areas": areas, "understaffed": understaffed, "staff_now": staff_now, "security": security_block,
+        "attention": attention, "summary": summary,
     }
+
+
+def _employee_entries_by_hour(day: str) -> dict[int, int]:
+    from app.reid import reid_db
+
+    with reid_db.get_connection() as conn:
+        rows = conn.execute("SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER), COUNT(*) FROM footfall_clips "
+                            "WHERE day = ? AND employee_id IS NOT NULL GROUP BY 1", (day,)).fetchall()
+    return {h: n for h, n in rows}
+
+
+def _restricted_entries(t0: float, t1: float) -> int | None:
+    with _conn() as conn:
+        try:
+            return conn.execute("SELECT COUNT(*) FROM restricted_events WHERE entered_at >= ? AND entered_at < ?", (t0, t1)).fetchone()[0]
+        except sqlite3.OperationalError:
+            return None

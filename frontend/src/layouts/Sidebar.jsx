@@ -11,7 +11,6 @@ import {
   TrendingUp,
   Cctv,
   MapPinned,
-  IdCard,
   CalendarCheck,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
@@ -60,19 +59,8 @@ const NAV_SECTIONS = [
     items: [
       { to: "/cameras", label: "Camera", icon: Cctv },
       { to: "/sites", label: "Site", icon: MapPinned },
-      { to: "/licenses", label: "Client License", icon: IdCard },
     ],
   },
-];
-
-// Analytics without a page of their own, switched from the CPU panel.
-const EXTRA_SWITCHES = [
-  ["expression", "Expression detection", "Reads facial expressions on the live person boxes (needs the live AI overlay on)."],
-  [
-    "appearance_handoff",
-    "Name by appearance",
-    "Names people facing away on the live view by body appearance, matched to someone recognised by face today (needs face recognition on).",
-  ],
 ];
 
 export default function Sidebar() {
@@ -88,38 +76,6 @@ export default function Sidebar() {
     return () => clearVisibleInterval(t);
   }, [isClient]);
 
-  // Analytics on/off switches + live CPU (backend/app/analytics_settings.py).
-  const [switches, setSwitches] = useState(null);
-  const [cpu, setCpu] = useState(null);
-  const [busy, setBusy] = useState(null);
-  useEffect(() => {
-    if (isClient) return;
-    const load = () =>
-      api
-        .getAnalyticsSettings()
-        .then((r) => {
-          setSwitches(r.features);
-          setCpu(r.cpu);
-        })
-        .catch(() => {});
-    load();
-    const t = setVisibleInterval(load, 10000);
-    return () => clearVisibleInterval(t);
-  }, [isClient]);
-
-  async function toggle(e, feature) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!switches || busy) return;
-    setBusy(feature);
-    try {
-      const r = await api.setAnalyticsFeature(feature, !switches[feature].on);
-      setSwitches(r.features);
-    } finally {
-      setBusy(null);
-    }
-  }
-
   const sections = NAV_SECTIONS.filter((s) => !(isClient && s.adminOnly))
     .map((s) => ({
       ...s,
@@ -132,127 +88,88 @@ export default function Sidebar() {
     }))
     .filter((s) => s.items.length > 0);
 
+  // Same visual language as the pages: a floating white card (rounded, soft
+  // shadow) on the page background, icons in soft tiles, an indigo-to-violet
+  // pill for the current page.
   return (
-    <aside className="hidden md:flex md:w-60 shrink-0 flex-col bg-white text-slate-600 border-r border-border-200 h-screen sticky top-0">
-      <div className="flex items-center gap-2 px-5 h-16 border-b border-border-100">
-        <BrandLogo size={28} />
-        <span className="text-ink-900 font-semibold tracking-tight">Deco Vision</span>
-      </div>
-
-      <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-5">
-        {sections.map((section, i) => (
-          <div key={i}>
-            {section.title && (
-              <p className="px-2 mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                {section.title}
-              </p>
-            )}
-            <div className="space-y-0.5">
-              {section.items.map(({ to, label, icon: Icon, badgeKey, analytics }) => {
-                const badge = badgeKey ? counts[badgeKey] : null;
-                const sw = analytics && switches ? switches[analytics] : null;
-                const blockedBy = sw && sw.on && !sw.effective ? switches[sw.requires]?.label : null;
-                return (
-                <NavLink
-                  key={to}
-                  to={to}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
-                      isActive
-                        ? "bg-brand-500 text-white"
-                        : "text-slate-600 hover:bg-[#f4f5f9] hover:text-ink-900"
-                    }`
-                  }
-                >
-                  <Icon size={17} strokeWidth={1.8} />
-                  <span className="flex-1">{label}</span>
-                  {badge ? (
-                    <span className="text-[11px] font-semibold bg-danger-500 text-white rounded-full px-1.5 py-0.5 leading-none">
-                      {badge}
-                    </span>
-                  ) : null}
-                  {sw && (
-                    <span
-                      role="switch"
-                      tabIndex={0}
-                      aria-checked={sw.on}
-                      aria-label={`${sw.label}: ${sw.on ? "on" : "off"}`}
-                      title={
-                        blockedBy
-                          ? `${sw.label} is on but paused: it needs ${blockedBy}`
-                          : `${sw.label} is ${sw.on ? "on" : "off"}. Click to turn it ${sw.on ? "off" : "on"}.`
-                      }
-                      onClick={(e) => toggle(e, analytics)}
-                      onKeyDown={(e) => (e.key === " " || e.key === "Enter") && toggle(e, analytics)}
-                      className={`relative inline-block w-8 h-[18px] rounded-full shrink-0 transition-colors cursor-pointer ring-1 ring-white/40 ${
-                        sw.effective ? "bg-success-500" : sw.on ? "bg-warning-500" : "bg-slate-300"
-                      } ${busy === analytics ? "opacity-60" : ""}`}
-                    >
-                      <span
-                        className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-all ${
-                          sw.on ? "left-[16px]" : "left-[2px]"
-                        }`}
-                      />
-                    </span>
-                  )}
-                </NavLink>
-                );
-              })}
-            </div>
+    <aside className="hidden md:flex md:w-64 shrink-0 h-screen sticky top-0 p-3 pr-0">
+      <div className="relative isolate flex flex-col w-full rounded-2xl bg-white/90 backdrop-blur-xl shadow-[0_1px_3px_rgba(15,23,42,0.06),0_8px_30px_rgba(79,70,229,0.07)] ring-1 ring-white/70 overflow-hidden">
+        <div className="flex items-center gap-2.5 px-5 h-16">
+          <BrandLogo size={30} />
+          <div className="leading-tight">
+            <span className="block text-ink-900 font-semibold tracking-tight">Deco Vision</span>
+            <span className="block text-[10px] uppercase tracking-[0.14em] text-slate-400">Smart monitoring</span>
           </div>
-        ))}
-      </nav>
-
-      {cpu && cpu.backend_pct !== undefined && (
-        <div className="px-5 py-2 border-t border-border-100 text-[11px] text-slate-500 space-y-0.5" title="Analytics switches above turn processing on or off to manage this load">
-          <p className="flex justify-between">
-            <span>Backend CPU</span>
-            <span className={`font-semibold ${cpu.backend_pct > 70 ? "text-danger-500" : "text-ink-900"}`}>{cpu.backend_pct}%</span>
-          </p>
-          <p className="flex justify-between">
-            <span>Whole laptop</span>
-            <span className={`font-semibold ${cpu.system_pct > 85 ? "text-danger-500" : "text-ink-900"}`}>{Math.round(cpu.system_pct)}%</span>
-          </p>
-          {EXTRA_SWITCHES.filter(([key]) => switches?.[key]).map(([key, label, hint]) => (
-            <p key={key} className="flex justify-between items-center pt-1">
-              <span title={hint}>{label}</span>
-              <span
-                role="switch"
-                tabIndex={0}
-                aria-checked={switches[key].on}
-                aria-label={`${label}: ${switches[key].on ? "on" : "off"}`}
-                title={switches[key].on && !switches[key].effective ? `${hint} It's on but paused until what it needs is on.` : hint}
-                onClick={(e) => toggle(e, key)}
-                onKeyDown={(e) => (e.key === " " || e.key === "Enter") && toggle(e, key)}
-                className={`relative inline-block w-8 h-[18px] rounded-full cursor-pointer ${
-                  switches[key].effective ? "bg-success-500" : switches[key].on ? "bg-warning-500" : "bg-slate-300"
-                }`}
-              >
-                <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-all ${switches[key].on ? "left-[16px]" : "left-[2px]"}`} />
-              </span>
-            </p>
-          ))}
-          <p className="flex justify-between">
-            <span>Free memory</span>
-            <span className={`font-semibold ${cpu.memory_free_gb < 1.5 ? "text-danger-500" : "text-ink-900"}`}>
-              {cpu.memory_free_gb} / {cpu.memory_total_gb} GB
-            </span>
-          </p>
         </div>
-      )}
 
-      <div className="p-3 border-t border-border-100">
-        <NavLink
-          to="/settings/profile"
-          className={({ isActive }) =>
-            `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
-              isActive ? "bg-brand-500 text-white" : "text-slate-600 hover:bg-[#f4f5f9] hover:text-ink-900"
-            }`
-          }
-        >
-          <Avatar name={user?.name || user?.username} size={28} />
-          <span>Settings</span>
-        </NavLink>
+        <nav className="flex-1 overflow-y-auto px-3 pb-3 space-y-3 [scrollbar-width:thin]">
+          {sections.map((section, i) => (
+            <div key={i}>
+              {section.title && (
+                <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">{section.title}</p>
+              )}
+              <div className="space-y-0.5">
+                {section.items.map(({ to, label, icon: Icon, badgeKey }) => {
+                  const badge = badgeKey ? counts[badgeKey] : null;
+                  return (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      className={({ isActive }) =>
+                        `group flex items-center gap-2.5 pl-1.5 pr-2.5 py-1 rounded-xl text-[13px] transition-all ${
+                          isActive
+                            ? "bg-gradient-to-r from-indigo-500 to-violet-500 text-white shadow-[0_6px_16px_-6px_rgba(99,102,241,0.65)]"
+                            : "text-slate-600 hover:bg-indigo-50/60 hover:text-ink-900"
+                        }`
+                      }
+                    >
+                      {({ isActive }) => (
+                        <>
+                          <span
+                            className={`w-7 h-7 rounded-lg grid place-items-center shrink-0 transition-colors ${
+                              isActive ? "bg-white/20 text-white" : "bg-slate-50 text-slate-500 group-hover:bg-white group-hover:text-indigo-600"
+                            }`}
+                          >
+                            <Icon size={15} strokeWidth={1.9} />
+                          </span>
+                          <span className="flex-1 leading-tight">{label}</span>
+                          {badge ? (
+                            <span
+                              className={`text-[10px] font-semibold rounded-full px-1.5 py-0.5 leading-none ${
+                                isActive ? "bg-white text-indigo-600" : "bg-rose-500 text-white"
+                              }`}
+                            >
+                              {badge}
+                            </span>
+                          ) : null}
+                        </>
+                      )}
+                    </NavLink>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        <div className="p-3 pt-1">
+          <NavLink
+            to="/settings/profile"
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-2 py-2 rounded-xl text-[13px] transition-all ${
+                isActive
+                  ? "bg-gradient-to-r from-indigo-500 to-violet-500 text-white shadow-[0_6px_16px_-6px_rgba(99,102,241,0.65)]"
+                  : "text-slate-600 hover:bg-indigo-50/60 hover:text-ink-900"
+              }`
+            }
+          >
+            <Avatar name={user?.name || user?.username || user?.email} size={30} />
+            <span className="flex-1 min-w-0">
+              <span className="block truncate font-medium">{user?.name || user?.username || user?.email || "Account"}</span>
+              <span className="block text-[11px] opacity-70">Settings</span>
+            </span>
+          </NavLink>
+        </div>
       </div>
     </aside>
   );
