@@ -7,7 +7,8 @@ import { liveCameraFor } from "../VisitorCameraGrid";
 import DeskZoneEditor from "../DeskZoneEditor";
 import StaffEntranceEditor from "../StaffEntranceEditor";
 import FootfallAddCamera from "../FootfallAddCamera";
-import RestrictedZoneEditor from "./RestrictedZoneEditor";
+import IntrusionZoneEditor from "../intrusion/IntrusionZoneEditor";
+import AlertClip from "../intrusion/AlertClip";
 import * as api from "../../api/client";
 
 // Zones & areas: every area marked on a camera, whatever it is for, in one
@@ -15,13 +16,14 @@ import * as api from "../../api/client";
 //   Employee zones   desks (who sits where; Workforce Insights)
 //   Visitor zones    visitor seating areas (unknown people -> visitor alerts;
 //                    recognised employees never alert)
-//   Restricted zones alert on entry (restricted_zones.py)
+//   Restricted zones restricted areas, entry gates and loitering zones (intrusion.py,
+//                    ported from MAINDV; also managed on the Intrusion page)
 //   Entry / exit     the staff gate line (attendance) and footfall gates
 
 const TYPE = {
   employee: { label: "Employee zone", icon: Armchair, cls: "bg-sky-50 text-sky-700" },
   visitor: { label: "Visitor zone", icon: Users, cls: "bg-violet-50 text-violet-700" },
-  restricted: { label: "Restricted zone", icon: ShieldAlert, cls: "bg-rose-50 text-rose-700" },
+  restricted: { label: "Restricted / intrusion zone", icon: ShieldAlert, cls: "bg-rose-50 text-rose-700" },
   entry_exit: { label: "Entry / exit", icon: DoorOpen, cls: "bg-emerald-50 text-emerald-700" },
 };
 const FILTERS = [["", "All zones"], ["employee", "Employee"], ["visitor", "Visitor"], ["restricted", "Restricted"], ["entry_exit", "Entry / exit"]];
@@ -55,18 +57,27 @@ export default function ZonesView({ visitorActivity }) {
     load();
   };
 
-  async function removeRestricted(z) {
-    if (!window.confirm(`Delete the restricted zone “${z.name}”? Its activity history is kept.`)) return;
+  async function removeIntrusion(z) {
+    if (!window.confirm(`Delete the zone “${z.name}”? Its alerts and history are kept.`)) return;
     try {
-      await api.zonesApi.deleteRestricted(z.id);
+      await api.intrusionApi.deleteZone(z.id);
       load();
     } catch (e) {
       setError(e.message);
     }
   }
 
+  async function editIntrusion(z) {
+    try {
+      const full = (await api.intrusionApi.zones(z.camera_id)).find((x) => x.id === z.id);
+      if (full) setEditor({ kind: "intrusion", zone: full });
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
   function edit(z) {
-    if (z.source === "restricted") setEditor({ kind: "restricted", zone: z });
+    if (z.source === "intrusion") editIntrusion(z);
     else if (z.source === "visitor_area") setEditor({ kind: "visitor", cameraId: z.camera_id });
     else if (z.source === "desk") setEditor({ kind: "desk" });
     else if (z.source === "staff_gate") setEditor({ kind: "gate" });
@@ -135,13 +146,13 @@ export default function ZonesView({ visitorActivity }) {
                 <button type="button" className="text-brand-600 font-medium" onClick={() => edit(z)}>
                   Edit
                 </button>
-                {(z.source === "restricted" || z.source === "visitor_area") && (
+                {(z.source === "intrusion" || z.source === "visitor_area") && (
                   <button type="button" className="text-slate-600 inline-flex items-center gap-0.5" onClick={() => setActivity(z)}>
                     Activity <ChevronRight size={12} />
                   </button>
                 )}
-                {z.source === "restricted" && (
-                  <button type="button" className="ml-auto text-slate-400 hover:text-danger-500" title="Delete zone" onClick={() => removeRestricted(z)}>
+                {z.source === "intrusion" && (
+                  <button type="button" className="ml-auto text-slate-400 hover:text-danger-500" title="Delete zone" onClick={() => removeIntrusion(z)}>
                     <Trash2 size={13} />
                   </button>
                 )}
@@ -157,7 +168,8 @@ export default function ZonesView({ visitorActivity }) {
           {[
             ["employee", "Employee zone", "Mark desks: records which recognised employee sits where.", () => setEditor({ kind: "desk" })],
             ["visitor", "Visitor zone", "A visitor seating area on a camera: unknown people raise visitor alerts.", () => setEditor({ kind: "visitor-pick" })],
-            ["restricted", "Restricted zone", "Alert when someone enters an area they should not.", () => setEditor({ kind: "restricted" })],
+            ["restricted", "Restricted / intrusion zone", "Alert when someone enters an area, or stays too long (loitering), during set hours. Alerts carry a video clip.", () => setEditor({ kind: "intrusion" })],
+            ["restricted", "Entry gate (intrusion)", "Mark an entry gate, e.g. Reception Entry Gate, on one or more cameras: alert when someone enters it during set hours.", () => setEditor({ kind: "intrusion", preset: { gate: true, name: "Reception Entry Gate", area: "Reception" } })],
             ["entry_exit", "Entry / exit · main gate", "The line employees cross at the main gate (attendance times).", () => setEditor({ kind: "gate" })],
             ["entry_exit", "Entry / exit · footfall gate", "Count people entering through a gate (footfall).", () => setEditor({ kind: "footfall", cameraId: null })],
           ].map(([type, label, help, go]) => {
@@ -200,50 +212,59 @@ export default function ZonesView({ visitorActivity }) {
         {editor?.kind === "gate" && <StaffEntranceEditor onSaved={load} />}
       </Modal>
       <FootfallAddCamera open={editor?.kind === "footfall"} initialCameraId={editor?.cameraId ?? null} gates={gates} onClose={done} onDone={load} />
-      <RestrictedZoneEditor open={editor?.kind === "restricted"} zone={editor?.zone || null} cameras={cameras} onClose={() => setEditor(null)} onSaved={done} />
+      <IntrusionZoneEditor open={editor?.kind === "intrusion"} zone={editor?.zone || null} preset={editor?.preset || null} cameras={cameras} onClose={done} onChanged={load} />
 
       <SidePanel open={!!activity} onClose={() => setActivity(null)} width="max-w-3xl" title={activity ? `${activity.name} · activity` : ""}>
-        {activity?.source === "restricted" && <RestrictedActivity zone={activity} />}
+        {activity?.source === "intrusion" && <IntrusionActivity zone={activity} />}
         {activity?.source === "visitor_area" && visitorActivity}
       </SidePanel>
     </div>
   );
 }
 
-function RestrictedActivity({ zone }) {
+function IntrusionActivity({ zone }) {
+  // This zone's intrusion / loitering alerts over the last 30 days, with their evidence clips.
   const [rows, setRows] = useState(null);
+  const [playing, setPlaying] = useState(null);
   useEffect(() => {
-    api.zonesApi.restrictedActivity(zone.id).then((d) => setRows(d.activity)).catch(() => setRows([]));
+    const d = new Date();
+    const end = d.toISOString().slice(0, 10);
+    d.setDate(d.getDate() - 29);
+    api.intrusionApi.alerts({ zone_id: zone.id, start: d.toISOString().slice(0, 10), end }).then((r) => setRows(r.alerts)).catch(() => setRows([]));
   }, [zone.id]);
   return (
-    <div className="text-sm">
-      <p className="text-xs text-slate-500 mb-3">{zone.rule}</p>
+    <div className="text-sm space-y-3">
+      <p className="text-xs text-slate-500">{zone.rule}</p>
       {!rows ? (
         <p className="text-slate-400">Loading…</p>
       ) : rows.length === 0 ? (
-        <p className="text-slate-400">Nobody has entered this zone yet.</p>
+        <p className="text-slate-400">No intrusion alerts for this zone in the last 30 days.</p>
       ) : (
         <table className="data-table">
           <thead>
             <tr>
-              <th>Who</th>
-              <th>Entered</th>
-              <th>Left</th>
-              <th>Alert</th>
+              <th>Detected</th>
+              <th>Event</th>
+              <th>Duration</th>
+              <th>Status</th>
+              <th>Clip</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
-                <td>{r.name}</td>
-                <td>{new Date(r.entered_at * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
-                <td>{r.left_at ? clock(r.left_at) : <span className="badge badge-warning">inside</span>}</td>
-                <td>{r.alert_id ? <span className="badge badge-danger">alert #{r.alert_id}</span> : <span className="text-slate-400">—</span>}</td>
+                <td>{new Date(r.ts * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
+                <td>{r.event === "Loitering Detected" ? "Loitering" : "Intrusion"}</td>
+                <td>{Math.round(r.duration_seconds)} s</td>
+                <td>{r.status}</td>
+                <td>{r.has_clip ? <button type="button" className="text-brand-600 text-xs" onClick={() => setPlaying(r)}>Play</button> : <span className="text-slate-400 text-xs">{r.clip_status || "-"}</span>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
+      {playing && <AlertClip key={playing.id} alertId={playing.id} clipStatus={playing.clip_status} label={`${playing.event} ${playing.zone_name}`} />}
+      <a href="/intrusion?tab=zones" className="text-xs text-brand-600">Manage all intrusion zones on the Intrusion page</a>
     </div>
   );
 }

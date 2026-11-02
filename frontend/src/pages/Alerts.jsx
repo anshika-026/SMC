@@ -5,6 +5,7 @@ import StatCard from "../components/StatCard";
 import DataTable from "../components/DataTable";
 import StatusBadge from "../components/StatusBadge";
 import SidePanel from "../components/SidePanel";
+import AlertClip from "../components/intrusion/AlertClip";
 import { useAuth } from "../context/AuthContext";
 const resolutionReasons = ["Visitor with permission", "Employee not yet enrolled", "False alarm", "Fixed", "Duplicate", "Other"];
 const RANGES = { Today: "today", Yesterday: "yesterday", "This week": "week", "All time": "all" };
@@ -102,7 +103,7 @@ export default function Alerts() {
   useEffect(() => {
     if (selected) {
       const fresh = alerts.find((a) => a.id === selected.id);
-      if (fresh && fresh.status !== selected.status) setSelected(fresh);
+      if (fresh && (fresh.status !== selected.status || fresh.clipStatus !== selected.clipStatus)) setSelected(fresh);
     }
   }, [alerts, selected]);
 
@@ -248,6 +249,7 @@ export default function Alerts() {
           { key: "date", label: "Date" },
           { key: "event", label: "Event" },
           { key: "camera", label: "Camera" },
+          { key: "zoneName", label: "Zone", render: (r) => r.zoneName || "-" },
           { key: "location", label: "Location" },
           { key: "time", label: "Time" },
           {
@@ -280,11 +282,14 @@ export default function Alerts() {
                 )}
               </div>
             )}
+            {/* Evidence video of an intrusion / loitering alert (backend/app/evidence.py). */}
+            <AlertClip alertId={selected.id} clipStatus={selected.clipStatus} label={`${selected.event} ${selected.zoneName || ""}`} onPending={load} />
             {selected.message && <p className="text-sm text-ink-900">{selected.message}</p>}
 
             <div className="space-y-2.5 text-sm">
               <Row label="Detection Type" value={selected.event} />
               <Row label="Camera" value={selected.camera} />
+              {selected.zoneName && <Row label="Zone" value={selected.zoneName} />}
               <Row label="Location" value={selected.location} />
               <Row label="Timestamp" value={`${selected.date} · ${selected.time}`} />
               <Row label="Severity" value={selected.severity} />

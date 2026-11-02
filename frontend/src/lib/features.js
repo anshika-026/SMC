@@ -12,6 +12,7 @@ const AI_FEATURES = new Set([
   "staff_count",
   "expression",
   "appearance_handoff",
+  "intrusion",
 ]);
 
 const ENABLED = new Set(
@@ -34,6 +35,7 @@ export function setLicensedFeatures(keys) {
 const SWITCH_LICENSE = {
   face_recognition: "face_recognition",
   appearance_handoff: "face_recognition",
+  intrusion: "intrusion_detection",
   desk_analytics: "workforce_analytics",
   footfall: "footfall_analytics",
   visitors: "visitor_management",

@@ -7,7 +7,9 @@ Zones & Areas screen:
   employee      desk zones (Workforce Insights): who sits at which desk
   visitor       visitor seating areas (Visitor Management): unknown people
                 waiting raise visitor alerts; recognised employees never do
-  restricted    restricted areas (restricted_zones.py): alert on entry
+  restricted    intrusion zones (intrusion.py, ported from MAINDV): restricted
+                areas and entry gates alert on entry inside their active
+                hours; loitering zones alert after a set time inside
   entry_exit    the main gate line (Staff Count) and footfall gates (entry
                 line and / or counting area)
 
@@ -51,7 +53,7 @@ def _safe(fn, default):
 
 
 def list_all(now: float | None = None) -> dict:
-    from app import desk_db, restricted_zones, visitors
+    from app import desk_db, intrusion, master_link, visitors
     from app.reid import reid_db
 
     now = now if now is not None else time.time()
@@ -81,15 +83,25 @@ def list_all(now: float | None = None) -> dict:
                     "activity": {"label": "visitor alerts today", "count": a.get("alerts", 0), "people": a.get("visits", 0),
                                  "employees": a.get("employees", 0), "last_at": a.get("last")}})
 
-    # Restricted zones.
-    r_today = _safe(lambda: restricted_zones.activity_counts(t0), {})
-    for z in _safe(restricted_zones.list_zones, []):
-        a = r_today.get(z["id"], {})
-        out.append({"key": f"restricted-{z['id']}", "id": z["id"], "type": "restricted", "source": "restricted", "name": z["name"],
-                    "camera_id": z["camera_id"], "camera": cam(z["camera_id"]), "shape": "polygon", "points": z["polygon"],
-                    "enabled": z["enabled"], "rule": f"{z['rule_label']} ({z['severity']}; at most one alert every {z['cooldown_minutes']:g} min).",
-                    "settings": {"rule": z["rule"], "severity": z["severity"], "cooldown_minutes": z["cooldown_minutes"]},
-                    "activity": {"label": "entries today", "count": a.get("entries", 0), "alerts": a.get("alerts", 0), "last_at": a.get("last_at")}})
+    # Restricted / loitering / entry-gate zones (the intrusion engine), only when licensed.
+    if master_link.feature_allowed("intrusion_detection"):
+        st = _safe(intrusion.stats, {"per_zone_today": {}, "last_seen": {}})
+        alerts_today = _safe(lambda: _intrusion_alerts(t0), {})
+        for z in _safe(intrusion.list_zones, []):
+            hours = f"{z['active_from']}–{z['active_to']}" if z.get("active_from") else "around the clock"
+            if z["zone_type"] == "loitering":
+                rule = f"Alerts when someone stays inside for {intrusion.format_duration(z.get('dwell_seconds') or 0)} ({hours})."
+            else:
+                rule = f"Alerts when someone enters{' this entry gate' if z['is_entry_gate'] else ''} ({hours})."
+            if not z["alerts_enabled"]:
+                rule += " Alerts are off; detections are still logged."
+            out.append({"key": f"intrusion-{z['id']}", "id": z["id"], "type": "restricted", "source": "intrusion",
+                        "name": f"{z['area']} · {z['name']}" if z["area"] else z["name"], "zone_name": z["name"], "area": z["area"],
+                        "is_entry_gate": z["is_entry_gate"], "zone_type": z["zone_type"],
+                        "camera_id": z["camera_id"], "camera": cam(z["camera_id"]), "shape": "polygon", "points": z["polygon"],
+                        "enabled": z["enabled"], "rule": rule,
+                        "activity": {"label": "detections today", "count": st["per_zone_today"].get(z["id"], 0),
+                                     "alerts": alerts_today.get(z["id"], 0), "last_at": st["last_seen"].get(z["id"])}})
 
     # Entry / exit: the main gate line (Staff Count).
     gate_today = _safe(lambda: _gate_activity(t0), {})
@@ -139,6 +151,13 @@ def _visitor_activity(t0: float) -> dict:
         for r in conn.execute("SELECT camera_id, COUNT(DISTINCT employee_id) AS employees FROM visitor_area_employee_log WHERE entered_at >= ? GROUP BY camera_id", (t0,)):
             out.setdefault(r["camera_id"], {})["employees"] = r["employees"]
     return out
+
+
+def _intrusion_alerts(t0: float) -> dict:
+    with _conn() as conn:
+        rows = conn.execute("SELECT zone_id, COUNT(*) FROM alerts WHERE ts >= ? AND zone_id IS NOT NULL "
+                            "AND event IN ('Intrusion Detected', 'Loitering Detected') GROUP BY zone_id", (t0,)).fetchall()
+    return {r[0]: r[1] for r in rows}
 
 
 def _staff_gates() -> list[dict]:

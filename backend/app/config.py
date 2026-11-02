@@ -224,6 +224,8 @@ FACE_CAPTURE_RETENTION_DAYS = _int("FACE_CAPTURE_RETENTION_DAYS", 60)
 SNAPSHOT_RETENTION_DAYS = _int("SNAPSHOT_RETENTION_DAYS", 30)
 # Snapshots attached to alerts that have been resolved.
 ALERT_SNAPSHOT_RETENTION_DAYS = _int("ALERT_SNAPSHOT_RETENTION_DAYS", 90)
+# Evidence clips of intrusion / loitering alerts (evidence.py): removed after this many days, the alert stays.
+ALERT_CLIP_RETENTION_DAYS = _int("ALERT_CLIP_RETENTION_DAYS", 7)
 # Classifier backups (classifier.joblib.bak-*) kept besides the active model.
 MODEL_BACKUP_RETENTION_COUNT = _int("MODEL_BACKUP_RETENTION_COUNT", 5)
 

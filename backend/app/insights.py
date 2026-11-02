@@ -196,7 +196,9 @@ def _safe(fn, default=None):
 
 
 # Alerts that are about security and safety (cameras going offline leave a blind spot).
-SECURITY_EVENTS = {"Unknown Person", "Person", "Restricted area entered", "Camera Offline"}
+SECURITY_EVENTS = {"Unknown Person", "Person", "Restricted area entered", "Camera Offline",
+                   "Intrusion Detected", "Loitering Detected"}
+INTRUSION_EVENTS = ("Intrusion Detected", "Loitering Detected")
 
 
 def business_overview(day: str | None = None, now: float | None = None) -> dict:
@@ -356,13 +358,19 @@ def business_overview(day: str | None = None, now: float | None = None) -> dict:
     prev_raised = _safe(lambda: [a for a in alerts.list_alerts("yesterday", limit=1000, now=day_start.timestamp() + 1) if sec(a)], [])
     open_alerts = [a for a in raised if a["status"] != "Resolved"]
     unknown = [a for a in raised if a["event"] in ("Unknown Person", "Person")]
-    restricted = [a for a in raised if a["event"] == "Restricted area entered"]
+    # Restricted-area alerts: the intrusion engine's ("Intrusion Detected"), plus any left from
+    # the earlier SMC restricted-zone monitor ("Restricted area entered").
+    restricted = [a for a in raised if a["event"] in ("Restricted area entered", "Intrusion Detected")]
+    loitering = [a for a in raised if a["event"] == "Loitering Detected"]
+    intrusion_on = master_link.feature_allowed("intrusion_detection") and analytics_settings.available("intrusion")
     restricted_entries = _safe(lambda: _restricted_entries(day_start.timestamp(), day_end), None)
     seating = _safe(lambda: [e for e in visitors.list_events(limit=200) if day_start.timestamp() <= (e["alert_at"] or e["entered_at"]) < day_end], [])
     sev = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
     incidents = [{"kind": "alert", "id": a["id"], "event": "Person" if a["event"] == "Unknown Person" else a["event"],
                   "severity": a["severity"], "camera": a["camera_name"], "ts": a["ts"], "time": _clock(a["ts"]),
-                  "status": a["status"], "message": a["message"], "picture": a["has_snapshot"]} for a in raised]
+                  "status": a["status"], "message": a["message"], "picture": a["has_snapshot"],
+                  # Intrusion / loitering alerts carry an evidence clip (evidence.py).
+                  "alert_clip": a.get("has_clip", False), "zone": a.get("zone_name")} for a in raised]
     incidents += [{"kind": "visitor_area", "id": e["id"], "event": "Unknown person in visitor seating", "severity": "Medium",
                    "camera": e["camera_name"], "ts": e["alert_at"] or e["entered_at"], "time": _clock(e["alert_at"] or e["entered_at"]),
                    "status": "Left" if e["status"] == "left" else "In area", "message": "", "clip": e["clip_ready"]} for e in seating]
@@ -374,9 +382,12 @@ def business_overview(day: str | None = None, now: float | None = None) -> dict:
         "unknown_persons": len(unknown) + len(seating),
         "restricted_violations": len(restricted),
         "restricted_entries": restricted_entries,
-        # This build has no intrusion or loitering detection (removed earlier), so
-        # these are reported as unavailable, never as zero.
-        "intrusion": None, "loitering": None,
+        # Intrusion / loitering alerts (intrusion.py). None (unavailable, never zero) when
+        # the feature isn't offered or licensed here.
+        "intrusion": len(restricted) + len(loitering) if intrusion_on else None,
+        "loitering": len(loitering) if intrusion_on else None,
+        "intrusion_open": sum(1 for a in restricted + loitering if a["status"] != "Resolved") if intrusion_on else None,
+        "intrusion_with_clip": sum(1 for a in restricted + loitering if a.get("has_clip")) if intrusion_on else None,
         "open": [{"id": a["id"], "event": "Person" if a["event"] == "Unknown Person" else a["event"], "severity": a["severity"],
                   "camera": a["camera_name"], "time": _clock(a["ts"]), "status": a["status"], "message": a["message"]}
                  for a in sorted(open_alerts, key=lambda a: (sev.get(a["severity"], 9), -a["ts"]))[:10]],
@@ -471,6 +482,7 @@ def _employee_entries_by_hour(day: str) -> dict[int, int]:
 def _restricted_entries(t0: float, t1: float) -> int | None:
     with _conn() as conn:
         try:
-            return conn.execute("SELECT COUNT(*) FROM restricted_events WHERE entered_at >= ? AND entered_at < ?", (t0, t1)).fetchone()[0]
+            # Itemized intrusion detections (intrusion.py logs one per zone at most every 30 s).
+            return conn.execute("SELECT COUNT(*) FROM intrusion_events WHERE ts >= ? AND ts < ?", (t0, t1)).fetchone()[0]
         except sqlite3.OperationalError:
             return None

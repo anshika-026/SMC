@@ -5,6 +5,7 @@ import { ArrowRight, Film, Image as ImageIcon } from "lucide-react";
 import SidePanel from "../SidePanel";
 import Modal from "../Modal";
 import VisitorEventDetail from "../VisitorEventDetail";
+import AlertClip from "../intrusion/AlertClip";
 import * as api from "../../api/client";
 
 // The detailed view behind each dashboard card, from the same day's business
@@ -330,6 +331,7 @@ export function FootfallDetail({ b, onClose, onChanged }) {
 export function SecurityDetail({ b, onClose }) {
   const s = b.security;
   const [clip, setClip] = useState(null);       // visitor-area event id (clip)
+  const [alertClip, setAlertClip] = useState(null); // intrusion / loitering alert with an evidence clip
   const [picture, setPicture] = useState(null); // {url|null, error, title}
 
   async function openPicture(x) {
@@ -349,7 +351,9 @@ export function SecurityDetail({ b, onClose }) {
           { label: "Active alerts", value: s.active, tone: s.high_or_critical ? "bad" : s.active ? "warn" : null, sub: `${s.high_or_critical} high or critical` },
           { label: "Unknown persons", value: s.unknown_persons, tone: s.unknown_persons ? "warn" : null },
           { label: "Restricted-area violations", value: s.restricted_violations, tone: s.restricted_violations ? "bad" : null, sub: s.restricted_entries !== null ? `${s.restricted_entries} entries logged` : null },
-          { label: "Intrusion / loitering", value: "Not set up", sub: "no intrusion detection in this installation" },
+          s.intrusion == null
+            ? { label: "Intrusion / loitering", value: "Not set up", sub: "not included in this installation" }
+            : { label: "Intrusion / loitering", value: s.intrusion, tone: s.intrusion_open ? "bad" : null, sub: `${s.loitering} loitering · ${s.intrusion_open} open` },
         ]} />
 
         <Block title={`Unresolved alerts (${s.open.length})`}>
@@ -382,6 +386,8 @@ export function SecurityDetail({ b, onClose }) {
                       <td>
                         {x.clip ? (
                           <button type="button" className="text-brand-600 text-xs inline-flex items-center gap-1" onClick={() => setClip(x.id)}><Film size={12} /> Play clip</button>
+                        ) : x.alert_clip ? (
+                          <button type="button" className="text-brand-600 text-xs inline-flex items-center gap-1" onClick={() => setAlertClip(x)}><Film size={12} /> Play clip</button>
                         ) : x.picture ? (
                           <button type="button" className="text-brand-600 text-xs inline-flex items-center gap-1" onClick={() => openPicture(x)}><ImageIcon size={12} /> Picture</button>
                         ) : <span className="text-slate-300">—</span>}
@@ -392,15 +398,21 @@ export function SecurityDetail({ b, onClose }) {
               </table>
             </div>
           )}
-          <p className="text-[11px] text-slate-400">Unknown people in the visitor seating area have ~10 s clips (kept 24 h); other alerts keep a picture.</p>
+          <p className="text-[11px] text-slate-400">
+            Unknown people in the visitor seating area have ~10 s clips (kept 24 h); intrusion and loitering alerts have ~10 s evidence clips; other alerts keep a picture.
+          </p>
         </Block>
 
         <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
           <FullPage to="/alerts" label="Open Alerts & Events (history)" />
-          <Link to="/visitors?tab=zones" className="btn-secondary text-sm">Restricted zones</Link>
+          {s.intrusion != null && <FullPage to="/intrusion" label="Open Intrusion" />}
+          <Link to="/visitors?tab=zones" className="btn-secondary text-sm">Zones &amp; areas</Link>
         </div>
       </div>
       {clip !== null && <VisitorEventDetail key={clip} eventId={clip} onClose={() => setClip(null)} onDeleted={() => setClip(null)} />}
+      <Modal open={!!alertClip} onClose={() => setAlertClip(null)} title={alertClip ? `${alertClip.event}${alertClip.zone ? ` · ${alertClip.zone}` : ""} · ${alertClip.camera} · ${alertClip.time}` : ""} width="max-w-2xl">
+        {alertClip && <AlertClip alertId={alertClip.id} clipStatus="ready" label={`${alertClip.event} ${alertClip.zone || ""}`} />}
+      </Modal>
       <Modal open={!!picture} onClose={() => setPicture(null)} title={picture?.title || ""} width="max-w-2xl">
         {picture?.url ? <img src={picture.url} alt="" className="w-full rounded-lg" /> : <p className="text-sm text-slate-500">{picture?.error || "Loading…"}</p>}
       </Modal>

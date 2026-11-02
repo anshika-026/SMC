@@ -58,7 +58,7 @@ models.apply_offline_environment()
 from . import audit, auth, camera_db, camera_stream, employee_directory, face_collection, face_db, face_pipeline, face_training_scheduler, license_db, ratelimit  # noqa: E402
 from .staff import routes as staff_routes  # noqa: E402
 from .staff.service import service as staff_service  # noqa: E402
-from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, ingest, license_routes, rtsp_reader, stream_source, restricted_zones, visitor_registry, visitor_registry_routes, visitor_routes, visitors, zone_routes  # noqa: E402
+from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, ingest, license_routes, rtsp_reader, stream_source, intrusion, intrusion_routes, visitor_registry, visitor_registry_routes, visitor_routes, visitors, zone_routes  # noqa: E402
 from . import health_routes, heap, lifecycle, person_detection, retention  # noqa: E402
 from . import master_link, sso_routes  # noqa: E402
 from .ratelimit import SlidingWindowLimiter  # noqa: E402
@@ -158,7 +158,8 @@ app.include_router(alerts_routes.router)
 app.include_router(analytics_routes.router)
 app.include_router(visitor_routes.router, dependencies=_licensed("visitor_management"))
 app.include_router(visitor_registry_routes.router, dependencies=_licensed("visitor_management"))
-app.include_router(zone_routes.router)       # restricted areas gated per route in zone_routes
+app.include_router(zone_routes.router)       # Zones & areas list (intrusion zones gated in zones.py by the license)
+app.include_router(intrusion_routes.router, dependencies=_licensed("intrusion_detection"))
 app.include_router(staff_routes.router, dependencies=_licensed("attendance"))
 app.include_router(health_routes.router)
 app.include_router(sso_routes.router)
@@ -216,7 +217,7 @@ def init_databases() -> None:
     alerts.init_db()
     visitors.init_db()
     visitor_registry.init_db()   # visitor profiles, visits, visit events, visit media (additive tables)
-    restricted_zones.init_db()   # restricted areas and their activity (additive tables)
+    intrusion.init_db()          # intrusion / loitering zones and detections (MAINDV, additive columns)
     desk_db.init_db()
 
 
@@ -246,8 +247,8 @@ def start_services() -> None:
     visitors.service.start()
     # Visitor records: expired snapshot/clip clean-up (see visitor_registry.py).
     visitor_registry.start()
-    # Restricted areas: alerts on entry (see restricted_zones.py).
-    restricted_zones.service.start()
+    # Intrusion / loitering zones: alerts with evidence clips (see intrusion.py, evidence.py).
+    intrusion.service.start()
     # Staff Count at entrance cameras (see app/staff/).
     staff_service.start()
     # Hourly cleanup of expired sessions, old captures/snapshots, backups (retention.py).

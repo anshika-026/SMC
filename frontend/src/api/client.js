@@ -165,6 +165,10 @@ function mapAlert(a) {
     occurrences: a.occurrences,
     lastSeen: new Date(a.last_seen * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     hasSnapshot: a.has_snapshot,
+    zoneId: a.zone_id ?? null,
+    zoneName: a.zone_name || null,
+    clipStatus: a.clip_status || null,   // pending | ready | unavailable | failed | expired | null (no clip for this kind of alert)
+    hasClip: !!a.has_clip,
     acknowledgedBy: a.acknowledged_by,
     resolvedBy: a.resolved_by,
     resolutionReason: a.resolution_reason,
@@ -195,6 +199,76 @@ export async function fetchAlertSnapshotObjectUrl(id) {
   if (!res.ok) throw new Error("No snapshot");
   return URL.createObjectURL(await res.blob());
 }
+// The evidence clip of an intrusion / loitering alert. The browser cannot send the login header from a
+// <video src>, so it is fetched with it and played from an object URL (a clip is about 10 seconds).
+// On failure the Error carries the server's own sentence and, for "still being prepared", status 409.
+async function fetchAlertClipBlob(id, download) {
+  const res = await fetch(`${BASE_URL}/alerts/${id}/clip${download ? "?download=1" : ""}`, { headers: { ...authHeaders() } });
+  if (res.status === 401) handleAuthFailure();
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json()).detail || "";
+    } catch {
+      /* not JSON */
+    }
+    const err = new Error(detail || "The clip could not be loaded.");
+    err.status = res.status;
+    throw err;
+  }
+  return res.blob();
+}
+export async function fetchAlertClipObjectUrl(id) {
+  return URL.createObjectURL(await fetchAlertClipBlob(id, false));
+}
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+export async function downloadAlertClip(id, filename) {
+  saveBlob(await fetchAlertClipBlob(id, true), filename || `alert-${id}.mp4`);
+}
+// ---- Intrusion / loitering (backend/app/intrusion.py, ported from MAINDV) ------------------
+export const intrusionApi = {
+  zones: (cameraId) => request(`/intrusion/zones${cameraId ? `?camera_id=${cameraId}` : ""}`),
+  createZone: ({ cameraId, name, polygon, from, to, zoneType = "restricted", dwellSeconds = null, graceSeconds = null, severity = null,
+    alertsEnabled = true, area = "", isEntryGate = false }) =>
+    request("/intrusion/zones", {
+      method: "POST",
+      body: JSON.stringify({
+        camera_id: cameraId,
+        name,
+        polygon,
+        active_from: from || null,
+        active_to: to || null,
+        zone_type: zoneType,
+        dwell_seconds: zoneType === "loitering" ? dwellSeconds : null,
+        grace_seconds: zoneType === "loitering" ? graceSeconds : null,
+        severity: severity || null,
+        alerts_enabled: alertsEnabled,
+        area: area || null,
+        is_entry_gate: isEntryGate,
+      }),
+    }),
+  updateZone: (id, fields) => request(`/intrusion/zones/${id}`, { method: "PATCH", body: JSON.stringify(fields) }),
+  deleteZone: (id) => request(`/intrusion/zones/${id}`, { method: "DELETE" }),
+  stats: () => request("/intrusion/stats"),
+  events: (start, end) => request(`/intrusion/events${qs({ start, end })}`),
+  alerts: (filters = {}) => request(`/intrusion/alerts${qs(filters)}`),
+  analytics: (filters = {}) => request(`/intrusion/analytics${qs(filters)}`),
+  async exportXlsx(start, end) {
+    const res = await fetch(`${BASE_URL}/intrusion/export${qs({ start, end })}`, { headers: { ...authHeaders() } });
+    if (res.status === 401) handleAuthFailure();
+    if (!res.ok) throw new Error(`Export failed (${res.status})`);
+    saveBlob(await res.blob(), `intrusion_${start}_${end}.xlsx`);
+  },
+};
 // ---- Cameras / Sites -----------------------------------------------------
 
 // Builds a display-only rtsp:// URL from a camera's non-secret connection
@@ -1180,14 +1254,10 @@ export const vr = {
   },
 };
 
-// ---- Zones & areas (backend zones.py, restricted_zones.py) and footfall history.
+// ---- Zones & areas (backend zones.py; restricted / loitering / entry-gate zones are
+// managed through intrusionApi above) and footfall history.
 export const zonesApi = {
   list: () => request("/zones"),
-  restricted: () => request("/zones/restricted"),
-  createRestricted: (z) => request("/zones/restricted", { method: "POST", body: JSON.stringify(z) }),
-  updateRestricted: (id, z) => request(`/zones/restricted/${id}`, { method: "PUT", body: JSON.stringify(z) }),
-  deleteRestricted: (id) => request(`/zones/restricted/${id}`, { method: "DELETE" }),
-  restrictedActivity: (id) => request(`/zones/restricted/${id}/activity`),
 };
 // Daily entries / exits for a date range, and one day's hourly arrivals.
 export async function getFootfallHistory(from, to) {

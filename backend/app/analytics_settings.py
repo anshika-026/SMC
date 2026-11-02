@@ -41,6 +41,7 @@ FEATURES = {
     "alerts": "Alerts",
     "expression": "Expression detection",
     "appearance_handoff": "Name by appearance",
+    "intrusion": "Intrusion & loitering",
 }
 # Switches that start OFF on a fresh install (until switched on and saved).
 DEFAULT_OFF: set[str] = set()

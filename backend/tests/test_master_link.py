@@ -41,9 +41,9 @@ class FakePortal:
 @pytest.fixture
 def tables(isolated_db, monkeypatch):
     """Tables of the feature modules these tests call (not created by conftest)."""
-    from app import attendance, presence, restricted_zones, visitor_registry, workforce
+    from app import attendance, intrusion, presence, visitor_registry, workforce
 
-    for mod in (attendance, workforce, presence, visitor_registry, restricted_zones):
+    for mod in (attendance, workforce, presence, visitor_registry, intrusion):
         monkeypatch.setattr(mod, "DB_PATH", isolated_db)
         mod.init_db()
 
@@ -251,7 +251,7 @@ FEATURE_ROUTES = {
     "visitor_management": "/api/visitor-records/settings",
     "footfall_analytics": "/api/footfall/history",
     "workforce_analytics": "/api/desk-zones",
-    "intrusion_detection": "/api/zones/restricted",
+    "intrusion_detection": "/api/intrusion/zones",
 }
 
 

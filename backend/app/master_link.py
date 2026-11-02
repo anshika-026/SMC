@@ -78,6 +78,7 @@ ANALYTICS_LICENSE_FEATURE = {
     "footfall": "footfall_analytics",
     "visitors": "visitor_management",
     "staff_count": "attendance",
+    "intrusion": "intrusion_detection",
 }
 
 _lock = threading.Lock()

@@ -113,7 +113,7 @@ def test_business_overview_handles_an_empty_day(isolated_db, monkeypatch):
     assert b["visitors"]["visitors"] == 0 and b["visitors"]["waiting_now"] == 0 and b["visitors"]["average_waiting_seconds"] is None
     assert b["footfall"]["entries"] == 0 and b["footfall"]["peak_hour"] is None
     s = b["security"]
-    assert s["active"] == 0 and s["incidents"] == [] and s["intrusion"] is None     # not supported: unavailable, not zero
+    assert s["active"] == 0 and s["incidents"] == [] and s["intrusion"] == 0       # intrusion detection (intrusion.py): none today
     assert isinstance(b["attention"], list) and [x["area"] for x in b["summary"]][-1] == "Security"
 
     past = insights.business_overview(_day(5))

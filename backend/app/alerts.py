@@ -77,12 +77,22 @@ def init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_open_key ON alerts (dedupe_key, status)")
+        # Zone + evidence-clip columns (from MAINDV's intrusion work; all nullable, so
+        # older rows and the other alert kinds are unaffected).
+        have = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+        for col, ddl in (("zone_id", "INTEGER"), ("zone_name", "TEXT"), ("clip_path", "TEXT"), ("clip_status", "TEXT")):
+            if col not in have:
+                conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {ddl}")
 
 
 def raise_alert(event: str, severity: str, camera_id: int | None = None, message: str = "",
                 dedupe_key: str | None = None, confidence: float | None = None,
                 employee_id: str | None = None, snapshot_jpeg: bytes | None = None,
-                now: float | None = None) -> int:
+                now: float | None = None, zone_id: int | None = None, zone_name: str | None = None,
+                on_created=None) -> int:
+    """on_created(alert_id): called once, only when a NEW row was inserted (not when an open alert
+    with the same dedupe_key was merely updated). The alert starts with clip_status 'pending'
+    when it is given, and the callback is responsible for finishing the clip."""
     from app import analytics_settings
 
     if not analytics_settings.enabled("alerts"):
@@ -97,9 +107,10 @@ def raise_alert(event: str, severity: str, camera_id: int | None = None, message
                 conn.execute("UPDATE alerts SET last_seen = ?, occurrences = occurrences + 1 WHERE id = ?", (now, row["id"]))
                 return row["id"]
         cur = conn.execute(
-            "INSERT INTO alerts (ts, last_seen, event, severity, camera_id, message, confidence, employee_id, dedupe_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (now, now, event, severity, camera_id, message, confidence, employee_id, dedupe_key),
+            "INSERT INTO alerts (ts, last_seen, event, severity, camera_id, message, confidence, employee_id, dedupe_key, "
+            "zone_id, zone_name, clip_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now, now, event, severity, camera_id, message, confidence, employee_id, dedupe_key,
+             zone_id, zone_name, "pending" if on_created else None),
         )
         alert_id = cur.lastrowid
         if snapshot_jpeg:
@@ -108,6 +119,12 @@ def raise_alert(event: str, severity: str, camera_id: int | None = None, message
             path.write_bytes(snapshot_jpeg)
             conn.execute("UPDATE alerts SET snapshot_path = ? WHERE id = ?", (storage.to_stored(path), alert_id))
     log.info("alert %s: %s (%s) camera %s %s", alert_id, event, severity, camera_id, message)
+    if on_created is not None:
+        try:
+            on_created(alert_id)
+        except Exception:
+            log.exception("alert %s: clip hand-off failed", alert_id)
+            set_clip(alert_id, None, "failed")
     return alert_id
 
 
@@ -170,6 +187,8 @@ def list_alerts(range_: str = "today", limit: int = 500, now: float | None = Non
         r["camera_name"] = cam.get("name") or (f"Camera {r['camera_id']}" if r["camera_id"] else "-")
         r["location"] = cam.get("site") or "-"
         r["has_snapshot"] = bool(r.pop("snapshot_path", None))
+        r.pop("clip_path", None)   # server-side location, never sent to the browser
+        r["has_clip"] = r.get("clip_status") == "ready"
     return rows
 
 
@@ -187,6 +206,30 @@ def summary(now: float | None = None) -> dict:
             "raised_last_hour": one("SELECT COUNT(*) FROM alerts WHERE last_seen >= ?", now - 3600),
             "raised_today": one("SELECT COUNT(*) FROM alerts WHERE ts >= ?", today),
         }
+
+
+def set_clip(alert_id: int, stored_path: str | None, status: str) -> None:
+    """Record how the evidence clip for an alert ended up: ready (with its stored path), failed
+    (encoding broke) or unavailable (the camera gave no footage around the event)."""
+    with _lock, _conn() as conn:
+        conn.execute("UPDATE alerts SET clip_path = ?, clip_status = ? WHERE id = ?", (stored_path, status, alert_id))
+
+
+def clip_info(alert_id: int) -> dict | None:
+    """{status, path, event, zone_name, camera_id} for an alert's clip, or None if the alert is unknown.
+    `path` is a resolved, existing, non-empty file only when status is 'ready'."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT clip_status, clip_path, event, zone_name, camera_id FROM alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+    if not row:
+        return None
+    path = None
+    if row["clip_status"] == "ready" and row["clip_path"]:
+        p = storage.resolve(row["clip_path"])
+        path = p if p is not None and p.is_file() and p.stat().st_size > 0 else None
+    status = row["clip_status"] if (row["clip_status"] != "ready" or path) else "failed"   # the file went missing
+    return {"status": status, "path": path, "event": row["event"], "zone_name": row["zone_name"], "camera_id": row["camera_id"]}
 
 
 def snapshot_path(alert_id: int) -> Path | None:

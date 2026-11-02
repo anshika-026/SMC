@@ -28,6 +28,7 @@ const CameraManagement = lazy(() => import("./pages/CameraManagement"));
 const SiteManagement = lazy(() => import("./pages/SiteManagement"));
 const LicenseManagement = lazy(() => import("./pages/LicenseManagement"));
 const FaceTraining = lazy(() => import("./pages/FaceTraining"));
+const Intrusion = lazy(() => import("./pages/Intrusion"));
 
 const SettingsLayout = lazy(() => import("./pages/settings/SettingsLayout"));
 const Profile = lazy(() => import("./pages/settings/Profile"));
@@ -96,6 +97,8 @@ export default function App() {
             <Route path="/live-feed" element={<Page><PlainLiveFeed /></Page>} />
             <Route path="/live-camera" element={<Feature name="live_overlay"><Page><LiveFeed /></Page></Feature>} />
             <Route path="/alerts" element={<Page><Alerts /></Page>} />
+            {/* One page for the dashboard Intrusion card, Security & Safety > Intrusion and Analytics > Intrusion analytics. */}
+            <Route path="/intrusion" element={<Feature name="intrusion" license="intrusion_detection"><Page><Intrusion /></Page></Feature>} />
             <Route path="/people" element={<Feature name="face_recognition"><Page><People /></Page></Feature>} />
             <Route path="/face-recognition" element={<Feature name="face_recognition"><Page><FaceRecognition /></Page></Feature>} />
             <Route path="/attendance" element={<Feature name="face_recognition" license="attendance"><Page><Attendance /></Page></Feature>} />

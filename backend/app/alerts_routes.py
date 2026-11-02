@@ -6,6 +6,8 @@ Alerts & Events (see alerts.py).
 Mount with: app.include_router(alerts_routes.router) in main.py
 """
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -39,6 +41,29 @@ def alert_snapshot(alert_id: int, _: dict = Depends(auth.require_admin)):
     if path is None:
         raise HTTPException(status_code=404, detail="No snapshot for this alert")
     return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/{alert_id}/clip")
+def alert_clip(alert_id: int, download: bool = False, _: dict = Depends(auth.require_admin)):
+    """The evidence video for an intrusion / loitering alert (see evidence.py). Never returns
+    anything but the alert's own finished clip; every other state is an explicit message, not an
+    empty video."""
+    info = alerts.clip_info(alert_id)
+    if info is None or info["status"] is None:
+        raise HTTPException(status_code=404, detail="No clip for this alert")
+    if info["status"] == "pending":
+        raise HTTPException(status_code=409, detail="The clip is still being prepared. Try again in a few seconds.")
+    if info["status"] == "unavailable":
+        raise HTTPException(status_code=404, detail="No video was available from the camera around this event.")
+    if info["status"] == "expired":
+        raise HTTPException(status_code=404, detail="This clip was removed after its retention period.")
+    if info["status"] != "ready" or info["path"] is None:
+        raise HTTPException(status_code=404, detail="The clip could not be saved.")
+    if not download:
+        return FileResponse(info["path"], media_type="video/mp4")
+    label = re.sub(r"[^A-Za-z0-9]+", "-", f"{info['event']} {info['zone_name'] or ''}").strip("-").lower()
+    return FileResponse(info["path"], media_type="video/mp4", filename=f"{label}-alert-{alert_id}.mp4",
+                        content_disposition_type="attachment")
 
 
 @router.post("/{alert_id}/acknowledge")

@@ -15,6 +15,8 @@ What it removes (each rule disabled by setting its setting to 0):
   - Re-ID body snapshots older than SNAPSHOT_RETENTION_DAYS   row + image
   - snapshots of alerts resolved more than
     ALERT_SNAPSHOT_RETENTION_DAYS ago                         image (alert row kept)
+  - intrusion / loitering alert evidence clips older than
+    ALERT_CLIP_RETENTION_DAYS                                 clip (alert row kept)
   - classifier backups beyond MODEL_BACKUP_RETENTION_COUNT
   - orphaned image files (no DB row points at them) older than a day, in the
     capture/snapshot folders only, and ONLY with RETENTION_DELETE_ORPHANS=true
@@ -133,6 +135,27 @@ def purge_alert_snapshots(now: float) -> int:
     return len(rows)
 
 
+def purge_alert_clips(now: float) -> int:
+    """Delete evidence clips of intrusion / loitering alerts older than the retention window. The
+    alert row and its snapshot stay; the clip's status becomes 'expired' so the page says why."""
+    if config.ALERT_CLIP_RETENTION_DAYS <= 0:
+        return 0
+    cutoff = _days_ago(config.ALERT_CLIP_RETENTION_DAYS, now)
+    with db.connect(_db_path()) as conn:
+        if not _table_exists(conn, "alerts"):
+            return 0
+        have = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+        if "clip_path" not in have:
+            return 0
+        rows = conn.execute(
+            "SELECT id, clip_path FROM alerts WHERE clip_path IS NOT NULL AND ts < ? LIMIT ?",
+            (cutoff, MAX_DELETIONS_PER_RULE)).fetchall()
+        conn.executemany("UPDATE alerts SET clip_path = NULL, clip_status = 'expired' WHERE id = ?", [(r[0],) for r in rows])
+    for _, path in rows:
+        _delete_file(path)
+    return len(rows)
+
+
 def purge_classifier_backups() -> int:
     from . import classifier_io
     from .face_pipeline import CLASSIFIER_PATH
@@ -192,6 +215,7 @@ def run_once(now: float | None = None) -> dict:
             ("training_captures", lambda: purge_training_captures(now)),
             ("reid_snapshots", lambda: purge_reid_snapshots(now)),
             ("alert_snapshots", lambda: purge_alert_snapshots(now)),
+            ("alert_clips", lambda: purge_alert_clips(now)),
             ("classifier_backups", purge_classifier_backups),
         ]
         if config.RETENTION_DELETE_ORPHANS:
