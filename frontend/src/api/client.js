@@ -1081,6 +1081,17 @@ export async function getVisitorAreaEmployeeVisits({ cameraId, limit = 100 } = {
   if (cameraId) q.set("camera_id", String(cameraId));
   return request(`/visitors/employee-visits?${q}`);
 }
+// Original face captures of one employee stay in a visitor area.
+export async function getEmployeeVisitSnapshots(stayId) {
+  return request(`/visitors/employee-visits/${stayId}/snapshots`);
+}
+// Needs the admin Bearer token, which a plain <img src> cannot send.
+export async function fetchEmployeeSnapshotObjectUrl(captureId) {
+  const res = await fetch(`${BASE_URL}/visitors/employee-snapshots/${captureId}`, { headers: { ...authHeaders() } });
+  if (res.status === 401) handleAuthFailure();
+  if (!res.ok) throw new Error(`Snapshot not available (${res.status})`);
+  return URL.createObjectURL(await res.blob());
+}
 // A <video> tag cannot send the Authorization header, so the clip is fetched
 // with it as a blob. Errors carry .status (409 = still recording, 410 =
 // deleted, 404 = no clip). Caller must URL.revokeObjectURL the result.

@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import audit, auth, camera_db, camera_stream, employee_directory, visitors
+from app import audit, auth, camera_db, camera_stream, employee_directory, storage, visitors
 
 router = APIRouter(prefix="/api/visitors", tags=["visitors"], dependencies=[Depends(auth.require_admin)])
 
@@ -99,9 +99,33 @@ def list_employee_visits(camera_id: int | None = None, limit: int = Query(100, g
     """Registered employees seen in a visitor area: kept apart from visitors,
     never alerted."""
     rows = visitors.list_employee_visits(camera_id, limit)
+    snaps = visitors.employee_stay_snapshots(rows)
     for r in rows:
-        r["name"] = employee_directory.get_display(r["employee_id"])[0] or r["employee_id"]
+        emp = employee_directory.get_employee(r["employee_id"]) or {}
+        r["name"] = emp.get("name") or r["employee_id"]
+        r["department"] = emp.get("company") or ""
+        r["person_type"] = "employee"
+        # Original face captures of this employee during this stay (read-only).
+        r["snapshot_count"] = len(snaps.get(r["id"], []))
+        r["snapshot_id"] = snaps[r["id"]][len(snaps[r["id"]]) // 2]["capture_id"] if snaps.get(r["id"]) else None
     return {"visits": rows}
+
+
+@router.get("/employee-visits/{stay_id}/snapshots")
+def employee_visit_snapshots(stay_id: int):
+    """The stored face captures of one employee stay in a visitor area."""
+    stay = visitors.get_employee_visit(stay_id)
+    if stay is None:
+        raise HTTPException(status_code=404, detail="Employee visit not found")
+    return {"snapshots": visitors.employee_stay_snapshots([stay])[stay_id]}
+
+
+@router.get("/employee-snapshots/{capture_id}")
+def employee_snapshot(capture_id: int):
+    path = storage.resolve(visitors.employee_snapshot_path(capture_id))
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.get("/events/{event_id}")

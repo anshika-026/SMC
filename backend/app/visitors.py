@@ -391,9 +391,76 @@ def list_employee_visits(camera_id: int | None = None, limit: int = 100) -> list
     params.append(limit)
     with _conn() as conn:
         rows = conn.execute(q, params).fetchall()
-    return [{"id": r["id"], "camera_id": r["camera_id"], "camera_name": r["camera_name"], "employee_id": r["employee_id"],
-             "arrived_at": r["entered_at"], "last_seen": r["last_seen"], "left_at": r["left_at"],
-             "status": "inside" if r["left_at"] is None else "left"} for r in rows]
+    now = time.time()
+    out = []
+    for r in rows:
+        # A stay still open in the log but not seen for longer than the
+        # absence grace (left_at never written, e.g. the backend restarted
+        # while they sat there) is shown as left at its last sighting. Display
+        # only: the stored row is not changed.
+        inside = r["left_at"] is None and now - r["last_seen"] <= EMPLOYEE_PRESENT_SECONDS
+        out.append({"id": r["id"], "camera_id": r["camera_id"], "camera_name": r["camera_name"], "employee_id": r["employee_id"],
+                    "arrived_at": r["entered_at"], "last_seen": r["last_seen"],
+                    "left_at": r["left_at"] if r["left_at"] is not None or inside else r["last_seen"],
+                    "status": "inside" if inside else "left"})
+    return out
+
+
+# An open employee stay's last_seen is written every LAST_IN_WRITE_SECONDS
+# while they are in the area; past this they are not there any more.
+EMPLOYEE_PRESENT_SECONDS = ABSENCE_GRACE_SECONDS + 2 * LAST_IN_WRITE_SECONDS
+
+# The face pipeline's stored training captures of the SAME employee, on the
+# SAME camera, during an employee stay: the original snapshots of that stay.
+# Read-only; nothing is generated or copied. Rejected captures are left out.
+_STAY_CAPTURES_SQL = (
+    "SELECT id, captured_at, camera_id FROM face_training_captures"
+    " WHERE camera_id = ? AND deleted_at IS NULL AND captured_at BETWEEN ? AND ?"
+    " AND COALESCE(label_status, '') != 'rejected' AND COALESCE(review_status, '') != 'rejected'"
+    " AND COALESCE(NULLIF(verified_employee_id, ''), NULLIF(employee_id, ''), NULLIF(auto_employee_id, '')) = ?"
+    " ORDER BY captured_at"
+)
+_STAY_MARGIN_SECONDS = 5
+
+
+def employee_stay_snapshots(stays: list[dict]) -> dict[int, list[dict]]:
+    """{stay id: [{capture_id, captured_at, camera_id}, ...]} for rows of
+    list_employee_visits."""
+    result: dict[int, list[dict]] = {}
+    with _conn() as conn:
+        for s in stays:
+            end = (s["left_at"] or s["last_seen"]) + _STAY_MARGIN_SECONDS
+            rows = conn.execute(_STAY_CAPTURES_SQL, (s["camera_id"], s["arrived_at"] - _STAY_MARGIN_SECONDS, end,
+                                                     str(s["employee_id"]))).fetchall()
+            result[s["id"]] = [{"capture_id": r["id"], "captured_at": r["captured_at"], "camera_id": r["camera_id"]} for r in rows]
+    return result
+
+
+def get_employee_visit(stay_id: int) -> dict | None:
+    with _conn() as conn:
+        r = conn.execute("SELECT id FROM visitor_area_employee_log WHERE id = ?", (stay_id,)).fetchone()
+    if r is None:
+        return None
+    return next((v for v in list_employee_visits(limit=10_000) if v["id"] == stay_id), None)
+
+
+def employee_snapshot_path(capture_id: int) -> str | None:
+    """The stored image of a capture, only if it belongs to an employee stay
+    in a visitor area (so this can't serve arbitrary training images)."""
+    with _conn() as conn:
+        cap = conn.execute(
+            "SELECT camera_id, captured_at, image_path, COALESCE(NULLIF(verified_employee_id, ''), NULLIF(employee_id, ''),"
+            " NULLIF(auto_employee_id, '')) AS emp FROM face_training_captures WHERE id = ? AND deleted_at IS NULL",
+            (capture_id,),
+        ).fetchone()
+        if cap is None or not cap["emp"]:
+            return None
+        stay = conn.execute(
+            "SELECT 1 FROM visitor_area_employee_log WHERE camera_id = ? AND employee_id = ?"
+            " AND entered_at - ? <= ? AND COALESCE(left_at, last_seen) + ? >= ?",
+            (cap["camera_id"], cap["emp"], _STAY_MARGIN_SECONDS, cap["captured_at"], _STAY_MARGIN_SECONDS, cap["captured_at"]),
+        ).fetchone()
+    return cap["image_path"] if stay else None
 
 
 def clip_file(event_id: int) -> tuple[Path | None, str]:

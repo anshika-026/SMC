@@ -39,8 +39,10 @@ const EVENTS_MS = 4_000;
 const RECORDS_MS = 20_000;
 const TOAST_MS = 8_000;
 const HIGHLIGHT_MS = 8_000;
-const TABS = ["Visitor records", "Visitor profiles", "Analytics", "Footfall", "Zones & areas"];
-const TAB_PARAM = { records: "Visitor records", profiles: "Visitor profiles", analytics: "Analytics", footfall: "Footfall", zones: "Zones & areas" };
+// "Employees in visitor area" restores the employee list the old Area
+// monitoring -> Employees tab showed (kept apart from visitor records).
+const TABS = ["Visitor records", "Employees in visitor area", "Visitor profiles", "Analytics", "Footfall", "Zones & areas"];
+const TAB_PARAM = { records: "Visitor records", employees: "Employees in visitor area", profiles: "Visitor profiles", analytics: "Analytics", footfall: "Footfall", zones: "Zones & areas" };
 const NO_FILTERS = { status: "", type: "", host: "", department: "", q: "" };
 
 // KPI card presets -> the records table's date range.
@@ -279,6 +281,7 @@ export default function VisitorManagement() {
           />
         </div>
       )}
+      {tab === "Employees in visitor area" && <VisitorEmployees />}
       {tab === "Visitor profiles" && <VisitorDirectory onOpenVisitor={setVisitorId} refreshKey={refreshKey} />}
       {tab === "Analytics" && <VisitorAnalytics onOpenVisitor={setVisitorId} />}
       {tab === "Footfall" && <FootfallView />}
