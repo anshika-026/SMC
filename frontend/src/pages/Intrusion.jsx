@@ -10,6 +10,7 @@ import ToggleSwitch from "../components/ToggleSwitch";
 import Tabs from "../components/Tabs";
 import SidePanel from "../components/SidePanel";
 import AlertClip from "../components/intrusion/AlertClip";
+import IntrusionKpiCards from "../components/intrusion/IntrusionKpiCards";
 import IntrusionZoneEditor from "../components/intrusion/IntrusionZoneEditor";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
@@ -74,7 +75,6 @@ export default function Intrusion() {
     }
   }
 
-  const open = (today || []).filter((a) => a.status !== "Resolved").length;
 
   return (
     <div className="space-y-5">
@@ -106,12 +106,14 @@ export default function Intrusion() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Zones" value={zones.length} sub={`${zones.filter((z) => z.enabled).length} enabled`} subTone="neutral" />
-        <StatCard label="Guarding now" value={zones.filter((z) => z.enabled && z.active_now).length} sub="inside their active hours" subTone="neutral" />
-        <StatCard label="Intrusion alerts today" value={today ? today.length : "—"} sub={today ? `${today.filter((a) => a.event === "Loitering Detected").length} loitering` : ""} subTone="danger" />
-        <StatCard label="Open alerts today" value={today ? open : "—"} sub="not resolved" subTone="danger" />
-      </div>
+      {/* KPI cards in the Attendance / Visitor Management style; a click opens the matching tab. */}
+      <IntrusionKpiCards
+        zones={zones}
+        refreshKey={today}
+        onAlerts={() => pickTab("Alerts")}
+        onZones={() => pickTab("Zones & schedule")}
+        onAnalytics={() => pickTab("Analytics")}
+      />
 
       <Tabs tabs={TABS} active={tab} onChange={pickTab} />
 
