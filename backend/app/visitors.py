@@ -382,28 +382,44 @@ def kpis(now: float | None = None, day: str | None = None) -> dict:
 
 
 def list_employee_visits(camera_id: int | None = None, limit: int = 100) -> list[dict]:
-    """Recognised employees seen in a visitor area (kept apart from visitors)."""
+    """Recognised employees seen in a visitor area (kept apart from visitors),
+    newest first, one row per presence: log rows of the same employee on the
+    same camera that overlap or follow within ABSENCE_GRACE_SECONDS are one
+    sitting (the tracker gives a seated person new track ids, and each id
+    logged its own row). Display only: stored rows are not changed."""
     q, params = "SELECT * FROM visitor_area_employee_log WHERE 1 = 1", []
     if camera_id is not None:
         q += " AND camera_id = ?"
         params.append(camera_id)
-    q += " ORDER BY entered_at DESC LIMIT ?"
-    params.append(limit)
+    q += " ORDER BY camera_id, employee_id, entered_at"
     with _conn() as conn:
         rows = conn.execute(q, params).fetchall()
     now = time.time()
-    out = []
+    merged: list[dict] = []
     for r in rows:
-        # A stay still open in the log but not seen for longer than the
-        # absence grace (left_at never written, e.g. the backend restarted
-        # while they sat there) is shown as left at its last sighting. Display
-        # only: the stored row is not changed.
+        # A row still open in the log but not seen for longer than the absence
+        # grace (left_at never written, e.g. the backend restarted while they
+        # sat there) counts as left at its last sighting.
         inside = r["left_at"] is None and now - r["last_seen"] <= EMPLOYEE_PRESENT_SECONDS
-        out.append({"id": r["id"], "camera_id": r["camera_id"], "camera_name": r["camera_name"], "employee_id": r["employee_id"],
-                    "arrived_at": r["entered_at"], "last_seen": r["last_seen"],
-                    "left_at": r["left_at"] if r["left_at"] is not None or inside else r["last_seen"],
-                    "status": "inside" if inside else "left"})
-    return out
+        end = r["last_seen"] if inside or r["left_at"] is None else max(r["left_at"], r["last_seen"])
+        cur = merged[-1] if merged else None
+        if (cur and cur["camera_id"] == r["camera_id"] and cur["employee_id"] == r["employee_id"]
+                and r["entered_at"] <= cur["_end"] + ABSENCE_GRACE_SECONDS):
+            cur["_end"] = max(cur["_end"], end)
+            cur["last_seen"] = max(cur["last_seen"], r["last_seen"])
+            cur["_inside"] = cur["_inside"] or inside
+            cur["log_ids"].append(r["id"])
+            continue
+        merged.append({"id": r["id"], "camera_id": r["camera_id"], "camera_name": r["camera_name"], "employee_id": r["employee_id"],
+                       "arrived_at": r["entered_at"], "last_seen": r["last_seen"], "_end": end, "_inside": inside,
+                       "log_ids": [r["id"]]})
+    out = []
+    for m in merged:
+        inside = m.pop("_inside")
+        end = m.pop("_end")
+        out.append({**m, "left_at": None if inside else end, "status": "inside" if inside else "left"})
+    out.sort(key=lambda v: v["arrived_at"], reverse=True)
+    return out[:limit]
 
 
 # An open employee stay's last_seen is written every LAST_IN_WRITE_SECONDS
