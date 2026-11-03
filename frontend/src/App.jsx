@@ -29,6 +29,7 @@ const SiteManagement = lazy(() => import("./pages/SiteManagement"));
 const LicenseManagement = lazy(() => import("./pages/LicenseManagement"));
 const FaceTraining = lazy(() => import("./pages/FaceTraining"));
 const Intrusion = lazy(() => import("./pages/Intrusion"));
+const SmcConnect = lazy(() => import("./pages/SmcConnect"));
 
 const SettingsLayout = lazy(() => import("./pages/settings/SettingsLayout"));
 const Profile = lazy(() => import("./pages/settings/Profile"));
@@ -99,6 +100,8 @@ export default function App() {
             <Route path="/alerts" element={<Page><Alerts /></Page>} />
             {/* Intrusion Detection: alerts, videos and historical insights on one page (Analytics > Intrusion). */}
             <Route path="/intrusion" element={<Feature name="intrusion" license="intrusion_detection"><Page><Intrusion /></Page></Feature>} />
+            {/* SMC Connect (WhatsApp Business notifications), from the profile menu. */}
+            <Route path="/connect" element={<AdminRoute><Page><SmcConnect /></Page></AdminRoute>} />
             <Route path="/people" element={<Feature name="face_recognition"><Page><People /></Page></Feature>} />
             <Route path="/face-recognition" element={<Feature name="face_recognition"><Page><FaceRecognition /></Page></Feature>} />
             <Route path="/attendance" element={<Feature name="face_recognition" license="attendance"><Page><Attendance /></Page></Feature>} />

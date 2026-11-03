@@ -1266,3 +1266,20 @@ export async function getFootfallHistory(from, to) {
 export async function getFootfallDay(date) {
   return request(`/footfall/day${qs({ date })}`);
 }
+// ---- SMC Connect: WhatsApp Business notifications (backend/app/whatsapp.py) -----------------
+// Credentials stay on the server; these calls only read status and manage rules / recipients.
+export const connectApi = {
+  overview: () => request("/connect/overview"),
+  connect: (countryCode, number) => request("/connect/connect", { method: "POST", body: JSON.stringify({ country_code: countryCode, number }) }),
+  verify: () => request("/connect/verify", { method: "POST" }),
+  disconnect: () => request("/connect/disconnect", { method: "POST" }),
+  recipients: () => request("/connect/recipients"),
+  addRecipient: (r) => request("/connect/recipients", { method: "POST", body: JSON.stringify(r) }),
+  updateRecipient: (id, f) => request(`/connect/recipients/${id}`, { method: "PATCH", body: JSON.stringify(f) }),
+  deleteRecipient: (id) => request(`/connect/recipients/${id}`, { method: "DELETE" }),
+  rules: () => request("/connect/rules"),
+  updateRule: (key, f) => request(`/connect/rules/${key}`, { method: "PATCH", body: JSON.stringify(f) }),
+  preview: (key, template) => request("/connect/preview", { method: "POST", body: JSON.stringify({ key, template }) }),
+  test: (body) => request("/connect/test", { method: "POST", body: JSON.stringify(body) }),
+  history: (f = {}) => request(`/connect/history${qs(f)}`),
+};

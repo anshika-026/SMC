@@ -61,6 +61,7 @@ from .staff.service import service as staff_service  # noqa: E402
 from . import alerts, alerts_routes, analytics_routes, analytics_settings, attendance, attendance_routes, desk_db, desk_routes, desks, face_routes, insights_routes, face_training_routes, capture_review_routes, footfall, footfall_routes, ingest, license_routes, rtsp_reader, stream_source, intrusion, intrusion_routes, visitor_registry, visitor_registry_routes, visitor_routes, visitors, zone_routes  # noqa: E402
 from . import health_routes, heap, lifecycle, person_detection, retention  # noqa: E402
 from . import master_link, sso_routes  # noqa: E402
+from . import whatsapp, whatsapp_routes  # noqa: E402
 from .ratelimit import SlidingWindowLimiter  # noqa: E402
 
 log = logging.getLogger("main")
@@ -163,6 +164,8 @@ app.include_router(intrusion_routes.router, dependencies=_licensed("intrusion_de
 app.include_router(staff_routes.router, dependencies=_licensed("attendance"))
 app.include_router(health_routes.router)
 app.include_router(sso_routes.router)
+app.include_router(whatsapp_routes.router)    # SMC Connect (WhatsApp Business), admin only
+app.include_router(whatsapp_routes.webhook)   # Meta delivery-status webhook (public, signature-checked)
 staff_routes.register_websockets(app)
 
 
@@ -218,6 +221,7 @@ def init_databases() -> None:
     visitors.init_db()
     visitor_registry.init_db()   # visitor profiles, visits, visit events, visit media (additive tables)
     intrusion.init_db()          # intrusion / loitering zones and detections (MAINDV, additive columns)
+    whatsapp.init_db()           # SMC Connect: recipients, rules, message log (additive tables)
     desk_db.init_db()
 
 
@@ -249,6 +253,8 @@ def start_services() -> None:
     visitor_registry.start()
     # Intrusion / loitering zones: alerts with evidence clips (see intrusion.py, evidence.py).
     intrusion.service.start()
+    # SMC Connect: WhatsApp notifications for new alerts, visitor check-ins and daily reports.
+    whatsapp.service.start()
     # Staff Count at entrance cameras (see app/staff/).
     staff_service.start()
     # Hourly cleanup of expired sessions, old captures/snapshots, backups (retention.py).

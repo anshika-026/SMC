@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Bell, ChevronDown, Calendar, User, ShieldCheck, LogOut } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import WhatsAppIcon from "../components/connect/WhatsAppIcon";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
 
@@ -99,6 +100,12 @@ export default function Topbar({ title }) {
                 className="w-full flex items-center gap-2.5 text-left px-3 py-2 hover:bg-[#f5f6fa]"
               >
                 <User size={15} className="text-slate-400" /> Profile
+              </button>
+              <button
+                onClick={() => { setMenuOpen(false); navigate("/connect"); }}
+                className="w-full flex items-center gap-2.5 text-left px-3 py-2 hover:bg-[#f5f6fa]"
+              >
+                <WhatsAppIcon size={15} className="text-[#25D366]" /> SMC Connect
               </button>
               <button
                 onClick={() => { setMenuOpen(false); navigate("/settings/notifications"); }}
