@@ -153,8 +153,9 @@ def test_currently_inside_and_currently_outside_today(wf):
     gate("E1", at(today, 9, 0))                          # still inside
     gate("E2", at(today, 9, 0), at(today, 14, 0))        # stepped out at 14:00, not back
     assert day_of("E1", today, now)["inside_now"]
-    r = day_of("E2", today, now)
-    assert r["outside_now"] and not r["inside_now"] and r["long_outside"]
+    assert day_of("E2", today, at(today, 14, 30))["outside_now"]
+    r = day_of("E2", today, now)                         # out over 40 min: not seen recently, still flagged long outside
+    assert r["location"] == "unknown" and not r["outside_now"] and not r["inside_now"] and r["long_outside"]
 
 
 def test_overtime_after_the_shift(wf):
@@ -287,6 +288,29 @@ def test_confirmed_exit_then_seen_inside_again_is_inside(gate_cam):
     recognised("E1", INSIDE_CAM, at(today, 14, 0), at(today, 14, 55))    # back without the gate naming them
     r = day_of("E1", today, now)
     assert r["location"] == "inside" and not r["outside_now"]
+
+
+def test_left_through_the_gate_is_outside_for_40_min_then_not_seen_recently(gate_cam):
+    today = "2026-10-30"
+    gate("E1", at(today, 9, 0), at(today, 13, 0))                         # left at 13:00
+    recognised("E1", INSIDE_CAM, at(today, 9, 5), at(today, 12, 55))
+    r = day_of("E1", today, at(today, 13, 40))                            # exactly 40 min out
+    assert r["location"] == "outside" and r["outside_now"] and r["outside_confirmed"]
+    r = day_of("E1", today, at(today, 13, 41))
+    assert r["location"] == "unknown" and not r["outside_now"] and not r["inside_now"]
+    assert "1:00 PM" in r["location_detail"] and "over 40 min" in r["location_detail"]
+
+
+def test_last_seen_at_the_gate_is_likely_outside_for_40_min_then_not_seen_recently(gate_cam):
+    today = "2026-10-30"
+    seen("E1", today, at(today, 10, 0), at(today, 14, 0))
+    recognised("E1", INSIDE_CAM, at(today, 10, 0), at(today, 13, 0))
+    recognised("E1", GATE_CAM, at(today, 13, 50), at(today, 14, 0))     # last at the gate 14:00
+    assert day_of("E1", today, at(today, 14, 40))["location"] == "likely_outside"
+    r = day_of("E1", today, at(today, 14, 41))
+    assert r["location"] == "unknown" and not r["outside_now"] and r["missing_exit"]   # still flagged: no gate exit
+    assert "over 40 min" in r["location_detail"]
+    assert workforce.overview(today, kpi="outside", now=at(today, 14, 41))["rows"] == []
 
 
 def test_nobody_seen_recently_is_unknown(gate_cam):

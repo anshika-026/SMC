@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import sqlite3
 import time
 
@@ -695,6 +696,9 @@ def _gate_cameras() -> set[int]:
 # sighting the newer evidence.
 SEEN_INSIDE_MINUTES = attendance.ATTENDANCE_ON_SITE_MINUTES
 GATE_NEWER_SECONDS = 120
+# How long after leaving through the gate someone stays "outside" / "likely
+# outside". Not back after that, they are "not seen recently".
+OUTSIDE_MINUTES = float(os.environ.get("ATTENDANCE_OUTSIDE_MINUTES", "40"))
 
 
 def _location(now: float, sessions: list[dict], current_out: float | None, sightings: list[dict],
@@ -705,7 +709,8 @@ def _location(now: float, sessions: list[dict], current_out: float | None, sight
       likely_outside  last recognised at the gate camera, not on any inside camera
                       since (they left without the gate naming them) - verify
       at_gate         only ever seen at the gate camera today (which side unknown)
-      unknown         not recognised anywhere recently"""
+      unknown         not recognised anywhere recently, or left through the gate
+                      more than OUTSIDE_MINUTES ago and not back since"""
     name = lambda c: camera_names.get(c, f"Camera {c}")  # noqa: E731
     clock = lambda t: datetime.datetime.fromtimestamp(t).strftime("%I:%M %p").lstrip("0")  # noqa: E731
     inside_ev = [x for x in sightings if x["camera_id"] not in gate_cams]
@@ -715,15 +720,24 @@ def _location(now: float, sessions: list[dict], current_out: float | None, sight
     t_in = last_in["last_seen"] if last_in else 0
     t_gate = last_gate["last_seen"] if last_gate else 0
     exit_at = (now - current_out) if current_out else None
+    gone = lambda t: now - t > OUTSIDE_MINUTES * 60  # noqa: E731
+    gone_detail = f"not back for over {OUTSIDE_MINUTES:g} min"
 
     if any(x["inside"] for x in sessions):
         entry = max(x["entry"] for x in sessions if x["inside"])
         return {"location": "inside", "location_detail": f"came in through the gate at {clock(entry)}", "location_at": entry}
     if exit_at and t_in <= exit_at:
+        if gone(exit_at):
+            return {"location": "unknown", "location_detail": f"left through the gate at {clock(exit_at)}, {gone_detail}",
+                    "location_at": exit_at}
         return {"location": "outside", "location_detail": f"left through the gate at {clock(exit_at)}", "location_at": exit_at}
     if last_in and now - t_in <= SEEN_INSIDE_MINUTES * 60 and t_in >= t_gate - GATE_NEWER_SECONDS:
         return {"location": "inside", "location_detail": f"seen on {name(last_in['camera_id'])} at {clock(t_in)}", "location_at": t_in}
     if last_gate and last_in and t_gate > t_in + GATE_NEWER_SECONDS:
+        if gone(t_gate):
+            # Still left without the gate naming them: keep the missing-exit flag.
+            return {"location": "unknown", "location_detail": f"last seen at the gate ({name(last_gate['camera_id'])}) at {clock(t_gate)}, {gone_detail}",
+                    "location_at": t_gate, "_unconfirmed_exit": True}
         return {"location": "likely_outside",
                 "location_detail": f"last seen at the gate ({name(last_gate['camera_id'])}) at {clock(t_gate)}, not inside since {clock(t_in)}",
                 "location_at": t_gate}
@@ -774,6 +788,7 @@ def classify(employee_id: str, day: str, *, policy: dict, seen: dict | None, ses
     if is_today and not sightings and not sessions and seen and now - seen["last_seen"] <= SEEN_INSIDE_MINUTES * 60:
         # No per-camera events (older data): seen by face recently.
         loc = {"location": "inside", "location_detail": "seen by face recently", "location_at": seen["last_seen"]}
+    unconfirmed_exit = loc.pop("_unconfirmed_exit", False) or loc["location"] == "likely_outside"
     inside_now = loc["location"] == "inside"
     missing_exit = any(s["exit"] and not s["exit_confirmed"] for s in sessions) and "exit" not in corrected
     missing_entry = bool(seen) and not sessions and "entry" not in corrected   # seen by face, never identified at the gate
@@ -835,7 +850,7 @@ def classify(employee_id: str, day: str, *, policy: dict, seen: dict | None, ses
         "outside_seconds": int(sum(outside) + (current_out or 0)),
         "outside_periods": len(outside) + (1 if current_out else 0),
         "long_outside": long_outside,
-        "missing_exit": (missing_exit or loc["location"] == "likely_outside") and "exit" not in corrected, "missing_entry": missing_entry,
+        "missing_exit": (missing_exit or unconfirmed_exit) and "exit" not in corrected, "missing_entry": missing_entry,
         # Manual corrections in force, and the recorded times they replaced.
         "corrected": bool(corrected), "corrections": list(corrected.values()),
         "presence_verified": "presence_verified" in corrected,
