@@ -89,12 +89,6 @@ export default function SmcConnect() {
         </div>
       </div>
 
-      {c?.demo_mode && (
-        <div className="rounded-2xl bg-indigo-500/10 ring-1 ring-indigo-400/30 px-4 py-3 text-sm text-indigo-100">
-          <b className="font-semibold">Demo mode.</b> The WhatsApp Cloud API credentials are not set on the SMC server, so nothing is sent.
-          Rules, recipients and templates can be prepared now; messages are logged as <i>Not sent</i> until WhatsApp is connected.
-        </div>
-      )}
       {c?.last_error && !c.demo_mode && <p className="rounded-xl bg-rose-500/10 ring-1 ring-rose-400/30 px-4 py-2 text-sm text-rose-200">{c.last_error}</p>}
       {error && <p className="text-sm text-rose-300">{error}</p>}
 
