@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Modal from "../Modal";
 import PolygonZoneEditor from "../PolygonZoneEditor";
+import EntryGateDraw from "./EntryGateDraw";
 import * as api from "../../api/client";
 import { ZONE_TYPES, dwellProblem, minutesToSeconds, secondsToMinutes } from "../../lib/zoneSettings";
 
@@ -68,7 +69,7 @@ export default function IntrusionZoneEditor({ open, zone = null, preset = null, 
       is_entry_gate: form.gate,
       active_from: form.from || null,
       active_to: form.to || null,
-      zone_type: form.type,
+      zone_type: form.gate ? "restricted" : form.type,   // an entry gate marks people coming in
       dwell_seconds: form.type === "loitering" ? dwellSeconds : null,
       severity: form.severity || null,
       alerts_enabled: form.alertsEnabled,
@@ -104,7 +105,7 @@ export default function IntrusionZoneEditor({ open, zone = null, preset = null, 
       </label>
       <label className="block">
         <span className="font-medium text-ink-900 block mb-1.5">Zone type</span>
-        <select value={form.type} onChange={set("type")} className="input-field">
+        <select value={form.gate ? "restricted" : form.type} onChange={set("type")} disabled={form.gate} className="input-field disabled:opacity-60">
           {ZONE_TYPES.map((t) => (
             <option key={t.value} value={t.value}>
               {t.label}
@@ -167,10 +168,15 @@ export default function IntrusionZoneEditor({ open, zone = null, preset = null, 
           ) : zone && !redraw ? (
             <>
               {details}
+              {form.gate && !zone.entry_line && (
+                <p className="text-xs text-warning-600">
+                  This entry gate has no gate line yet, so it alerts on anyone inside it. Draw the line to mark only people who come in.
+                </p>
+              )}
               {error && <p className="text-sm text-danger-500">{error}</p>}
               <div className="flex flex-wrap justify-end gap-2">
                 <button type="button" className="btn-secondary text-sm mr-auto" onClick={() => setRedraw(true)}>
-                  Redraw the outline
+                  {form.gate ? (zone.entry_line ? "Redraw the gate line" : "Draw the gate line") : "Redraw the outline"}
                 </button>
                 <button type="button" className="btn-secondary text-sm" onClick={onClose}>
                   Cancel
@@ -179,6 +185,37 @@ export default function IntrusionZoneEditor({ open, zone = null, preset = null, 
                   Save changes
                 </button>
               </div>
+            </>
+          ) : form.gate ? (
+            <>
+              <EntryGateDraw
+                cameras={zoneCameras}
+                initial={zone}
+                canSave={canSave}
+                extraFields={details}
+                saveLabel={zone ? "Save gate" : "Save entry gate"}
+                saveGate={async (cameraId, gate) => {
+                  if (zone) {
+                    const z = await api.intrusionApi.updateZone(zone.id, { ...fields(), ...gate });
+                    onChanged?.();
+                    onClose();
+                    return z.name;
+                  }
+                  const z = await api.intrusionApi.createZone({
+                    cameraId, polygon: gate.polygon, entryLine: gate.entry_line, insideSign: gate.inside_sign, name: form.name.trim(),
+                    area: form.area.trim(), isEntryGate: true, from: form.from, to: form.to, zoneType: "restricted",
+                    severity: form.severity || null, alertsEnabled: form.alertsEnabled,
+                  });
+                  setSaved((s) => [...new Set([...s, cameraId])]);
+                  onChanged?.();
+                  return `${z.name} on ${editorCameras.find((c) => c.id === cameraId)?.label || "the camera"}`;
+                }}
+              />
+              {!zone && saved.length > 0 && (
+                <p className="text-xs text-slate-500">
+                  Saved on {saved.length} camera{saved.length === 1 ? "" : "s"}. To watch the same gate from another camera, pick it above and draw its line there.
+                </p>
+              )}
             </>
           ) : (
             <>

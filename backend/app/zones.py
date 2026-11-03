@@ -91,8 +91,12 @@ def list_all(now: float | None = None) -> dict:
             hours = f"{z['active_from']}–{z['active_to']}" if z.get("active_from") else "around the clock"
             if z["zone_type"] == "loitering":
                 rule = f"Alerts when someone stays inside for {intrusion.format_duration(z.get('dwell_seconds') or 0)} ({hours})."
+            elif intrusion.is_counting_gate(z):
+                rule = f"Marks each person who comes in through this gate; people going out are not marked ({hours})."
+            elif z["is_entry_gate"]:
+                rule = f"Entry gate without a gate line yet: alerts on anyone inside it. Draw the line to mark only people coming in ({hours})."
             else:
-                rule = f"Alerts when someone enters{' this entry gate' if z['is_entry_gate'] else ''} ({hours})."
+                rule = f"Alerts when someone enters ({hours})."
             if not z["alerts_enabled"]:
                 rule += " Alerts are off; detections are still logged."
             out.append({"key": f"intrusion-{z['id']}", "id": z["id"], "type": "restricted", "source": "intrusion",

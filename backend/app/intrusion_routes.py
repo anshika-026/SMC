@@ -82,6 +82,17 @@ def _check_zone_settings(zone_type: str, dwell_seconds, grace_seconds, severity)
         raise HTTPException(status_code=422, detail="The grace period must be between 0 and 300 seconds")
 
 
+def _check_gate_line(line) -> None:
+    """An entry gate's line: 2 points inside the picture, long enough to cross."""
+    if line is None:
+        return
+    if len(line) != 2 or any(len(p) != 2 or not (0 <= p[0] <= 1 and 0 <= p[1] <= 1) for p in line):
+        raise HTTPException(status_code=422, detail="The gate line needs 2 points inside the picture")
+    (x1, y1), (x2, y2) = line
+    if ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 < 0.03:
+        raise HTTPException(status_code=422, detail="The gate line is too short. Click two points across the gate")
+
+
 def _check_window(start, end):
     if (start is None) != (end is None) or any(v is not None and not _HHMM.match(v) for v in (start, end)):
         raise HTTPException(status_code=422, detail="Active hours need both a start and an end, like 19:00 and 08:00")
@@ -113,6 +124,8 @@ class ZoneIn(BaseModel):
     alerts_enabled: bool = True
     area: str | None = None               # SMC: the area the zone belongs to, e.g. "Reception"
     is_entry_gate: bool = False           # SMC: this zone is an entry gate, e.g. "Reception Entry Gate"
+    entry_line: list[list[float]] | None = None   # SMC, entry gates: people crossing it towards inside are marked
+    inside_sign: int = 1                  # which side of the line is inside (the editor's arrow)
 
 
 @router.post("/zones")
@@ -124,12 +137,16 @@ def create_zone(payload: ZoneIn):
     _check_polygon(payload.polygon)
     _check_window(payload.active_from or None, payload.active_to or None)
     _check_zone_settings(payload.zone_type, payload.dwell_seconds, payload.grace_seconds, payload.severity)
+    _check_gate_line(payload.entry_line)
+    if payload.entry_line and (not payload.is_entry_gate or payload.zone_type != "restricted"):
+        raise HTTPException(status_code=422, detail="Only an entry gate (not a loitering zone) has a gate line")
     return intrusion.create_zone(
         payload.camera_id, payload.name.strip(), payload.polygon, payload.active_from or None, payload.active_to or None,
         zone_type=payload.zone_type, dwell_seconds=payload.dwell_seconds if payload.zone_type == "loitering" else None,
         grace_seconds=payload.grace_seconds if payload.zone_type == "loitering" else None,
         severity=payload.severity, alerts_enabled=payload.alerts_enabled,
-        area=(payload.area or "").strip() or None, is_entry_gate=payload.is_entry_gate)
+        area=(payload.area or "").strip() or None, is_entry_gate=payload.is_entry_gate,
+        entry_line=payload.entry_line if payload.is_entry_gate else None, inside_sign=payload.inside_sign)
 
 
 class ZoneUpdate(BaseModel):
@@ -145,6 +162,8 @@ class ZoneUpdate(BaseModel):
     alerts_enabled: bool | None = None
     area: str | None = None
     is_entry_gate: bool | None = None
+    entry_line: list[list[float]] | None = None
+    inside_sign: int | None = None
 
 
 @router.patch("/zones/{zone_id}")
@@ -169,7 +188,13 @@ def update_zone(zone_id: int, payload: ZoneUpdate):
         del fields["zone_type"]
     if "is_entry_gate" in fields and fields["is_entry_gate"] is None:
         del fields["is_entry_gate"]
+    if "entry_line" in fields:
+        _check_gate_line(fields["entry_line"])
+    if "inside_sign" in fields and fields["inside_sign"] is None:
+        del fields["inside_sign"]
     merged = {**existing, **fields}
+    if merged.get("entry_line") and (not merged.get("is_entry_gate") or merged["zone_type"] != "restricted"):
+        raise HTTPException(status_code=422, detail="Only an entry gate (not a loitering zone) has a gate line")
     _check_zone_settings(merged["zone_type"], merged.get("dwell_seconds"), merged.get("grace_seconds"), merged.get("severity"))
     if merged["zone_type"] != "loitering":
         fields.update(dwell_seconds=None, grace_seconds=None)  # only loitering zones carry a duration

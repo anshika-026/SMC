@@ -54,7 +54,7 @@ def test_unified_list_shows_every_zone_type_with_activity(zs, monkeypatch):
     store = by[f"intrusion-{z['id']}"]
     assert store["source"] == "intrusion" and store["name"] == "Back office · Store" and store["activity"]["count"] == 1
     g_zone = by[f"intrusion-{gate['id']}"]
-    assert g_zone["is_entry_gate"] and "entry gate" in g_zone["rule"] and "19:00–08:00" in g_zone["rule"]
+    assert g_zone["is_entry_gate"] and "without a gate line" in g_zone["rule"] and "19:00–08:00" in g_zone["rule"]
 
 
 def test_unlicensed_intrusion_zones_are_left_out(zs, monkeypatch):

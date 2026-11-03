@@ -38,7 +38,7 @@ import time
 import cv2
 import numpy as np
 
-from app import alerts, analytics_settings, camera_db, evidence, loitering, resilience
+from app import alerts, analytics_settings, camera_db, evidence, gate_crossing, loitering, resilience
 from app.desk_tracker import in_polygon
 from app import lifecycle
 from app import config, db
@@ -96,7 +96,9 @@ def init_db() -> None:
         for col, ddl in (("zone_type", "TEXT NOT NULL DEFAULT 'restricted'"), ("dwell_seconds", "INTEGER"),
                          ("grace_seconds", "REAL"), ("severity", "TEXT"), ("alerts_enabled", "INTEGER NOT NULL DEFAULT 1"),
                          # SMC: the area a zone belongs to, and whether it is an entry gate.
-                         ("area", "TEXT"), ("is_entry_gate", "INTEGER NOT NULL DEFAULT 0")):
+                         ("area", "TEXT"), ("is_entry_gate", "INTEGER NOT NULL DEFAULT 0"),
+                         # SMC: an entry gate's line and which side is inside (gate_crossing.py).
+                         ("entry_line", "TEXT"), ("inside_sign", "INTEGER NOT NULL DEFAULT 1")):
             if col not in have:
                 conn.execute(f"ALTER TABLE intrusion_zones ADD COLUMN {col} {ddl}")
 
@@ -111,6 +113,8 @@ def _zone(row) -> dict:
     d["zone_type"] = d.get("zone_type") or "restricted"
     d["is_entry_gate"] = bool(d.get("is_entry_gate"))
     d["area"] = d.get("area") or ""
+    d["entry_line"] = json.loads(d["entry_line"]) if d.get("entry_line") else None
+    d["inside_sign"] = -1 if (d.get("inside_sign") or 1) < 0 else 1
     return d
 
 
@@ -131,15 +135,15 @@ def get_zone(zone_id: int) -> dict | None:
 def create_zone(camera_id: int, name: str, polygon: list, active_from: str | None, active_to: str | None,
                 zone_type: str = "restricted", dwell_seconds: int | None = None, grace_seconds: float | None = None,
                 severity: str | None = None, alerts_enabled: bool = True, area: str | None = None,
-                is_entry_gate: bool = False) -> dict:
+                is_entry_gate: bool = False, entry_line: list | None = None, inside_sign: int = 1) -> dict:
     with _conn() as conn:
         cur = conn.execute(
             "INSERT INTO intrusion_zones (camera_id, name, polygon, active_from, active_to, created_at, "
-            "zone_type, dwell_seconds, grace_seconds, severity, alerts_enabled, area, is_entry_gate) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "zone_type, dwell_seconds, grace_seconds, severity, alerts_enabled, area, is_entry_gate, entry_line, inside_sign) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (camera_id, name, json.dumps(polygon), active_from, active_to, time.time(),
              zone_type, dwell_seconds, grace_seconds, severity, int(bool(alerts_enabled)), area or None,
-             int(bool(is_entry_gate))),
+             int(bool(is_entry_gate)), json.dumps(entry_line) if entry_line else None, -1 if inside_sign < 0 else 1),
         )
         row = conn.execute("SELECT * FROM intrusion_zones WHERE id = ?", (cur.lastrowid,)).fetchone()
     service.refresh()
@@ -149,8 +153,14 @@ def create_zone(camera_id: int, name: str, polygon: list, active_from: str | Non
 def update_zone(zone_id: int, **fields) -> dict | None:
     allowed = {k: v for k, v in fields.items() if k in (
         "name", "active_from", "active_to", "enabled", "polygon", "zone_type", "dwell_seconds", "grace_seconds",
-        "severity", "alerts_enabled", "area", "is_entry_gate")}
+        "severity", "alerts_enabled", "area", "is_entry_gate", "entry_line", "inside_sign")}
     if allowed:
+        if "entry_line" in allowed:
+            allowed["entry_line"] = json.dumps(allowed["entry_line"]) if allowed["entry_line"] else None
+        if "inside_sign" in allowed:
+            allowed["inside_sign"] = -1 if (allowed["inside_sign"] or 1) < 0 else 1
+        if allowed.keys() & {"polygon", "entry_line", "inside_sign", "is_entry_gate"}:
+            service._gates.reset_zone(zone_id)       # a changed gate starts its crossings clean
         if "enabled" in allowed:
             allowed["enabled"] = int(bool(allowed["enabled"]))
         if "is_entry_gate" in allowed:
@@ -369,6 +379,7 @@ class IntrusionService:
         self._sinks: dict[int, _KeepAliveSink] = {}
         self._health: dict[int, resilience.FeatureHealth] = {}
         self._loiter = loitering.LoiterTracker()
+        self._gates = gate_crossing.GateCounter()
         self._started = False
 
     def start(self) -> None:
@@ -385,6 +396,7 @@ class IntrusionService:
                 by_cam.setdefault(z["camera_id"], []).append(z)
         self._zones = by_cam
         self._loiter.keep_only({z["id"] for zs in by_cam.values() for z in zs if z["zone_type"] == "loitering"})
+        self._gates.keep_only({z["id"] for zs in by_cam.values() for z in zs if is_counting_gate(z)})
         if self._started:
             # SMC: start streaming / buffering a newly guarded camera now, not at the next
             # keep-alive pass (up to SYNC_INTERVAL_SECONDS later), so the first alert of a new
@@ -447,18 +459,27 @@ class IntrusionService:
         # Runs on an executor: an exception here would otherwise vanish into
         # the Future unlogged. Logged and retried on a backoff instead.
         try:
-            self._detect_inner(camera_id, frame, zones, now, boxes)
+            self._detect_inner(camera_id, frame, zones, now, boxes, people or [])
             self._loiter_inner(camera_id, frame, zones, now, people or [])
         except Exception as e:
             self.health(camera_id).failure(e)
         else:
             self.health(camera_id).success()
 
-    def _detect_inner(self, camera_id: int, frame: np.ndarray, zones: list[dict], now: float, boxes: list) -> None:
+    def _detect_inner(self, camera_id: int, frame: np.ndarray, zones: list[dict], now: float, boxes: list,
+                      people: list | None = None) -> None:
         zones = [z for z in zones if z.get("zone_type", "restricted") != "loitering"]   # handled by _loiter_inner
+        h, w = frame.shape[:2]
+        # SMC: an entry gate with a line marks each person who comes IN (gate_crossing.py), never
+        # people going out; it runs even on an empty frame so someone who walked in out of view counts.
+        for zone in [z for z in zones if is_counting_gate(z)]:
+            tracked = [p for p in (people or []) if p.get("track_id") is not None and p["confidence"] >= PERSON_CONF]
+            for entry in self._gates.observe(zone["id"], zone["entry_line"], zone["inside_sign"], tracked, w, h, now,
+                                             area=zone["polygon"]):
+                self._mark_entry(camera_id, frame, zone, entry, now)
+        zones = [z for z in zones if not is_counting_gate(z)]
         if not boxes:
             return
-        h, w = frame.shape[:2]
         for zone in zones:
             inside = [b for b in boxes if in_polygon((b[0] + b[2]) / 2 / w, b[3] / h, zone["polygon"])]
             if not inside:
@@ -477,6 +498,21 @@ class IntrusionService:
                 zone_id=zone["id"], zone_name=zone["name"],
                 on_created=lambda aid: evidence.service.schedule(aid, camera_id, now),
             )
+
+    def _mark_entry(self, camera_id: int, frame: np.ndarray, zone: dict, entry: dict, now: float) -> None:
+        """One person came in through an entry gate: logged, and (alerts on) their own alert + clip."""
+        with _conn() as conn:
+            conn.execute("INSERT INTO intrusion_events (zone_id, camera_id, ts, people) VALUES (?, ?, ?, 1)",
+                         (zone["id"], camera_id, now))
+        if not zone.get("alerts_enabled", True):
+            return
+        alerts.raise_alert(
+            "Intrusion Detected", zone.get("severity") or "High", camera_id,
+            message=f"1 person came in through {zone['name']}",
+            snapshot_jpeg=_annotate(frame, zone, [entry["bbox"]]), now=now,
+            zone_id=zone["id"], zone_name=zone["name"],
+            on_created=lambda aid: evidence.service.schedule(aid, camera_id, now),
+        )
 
     def _loiter_inner(self, camera_id: int, frame: np.ndarray, zones: list[dict], now: float, people: list) -> None:
         """Loitering zones: a tracked person who stays inside one for its duration raises ONE alert
@@ -529,6 +565,11 @@ def format_duration(seconds: float) -> str:
     return f"{seconds} second{'s' if seconds != 1 else ''}"
 
 
+def is_counting_gate(zone: dict) -> bool:
+    """An entry gate with a gate line: it marks people coming in, not presence."""
+    return bool(zone.get("is_entry_gate") and zone.get("entry_line"))
+
+
 def _annotate(frame: np.ndarray, zone: dict, boxes) -> bytes | None:
     img = frame.copy()
     h, w = img.shape[:2]
@@ -537,6 +578,9 @@ def _annotate(frame: np.ndarray, zone: dict, boxes) -> bytes | None:
     cv2.fillPoly(overlay, [pts], (60, 60, 230))
     img = cv2.addWeighted(overlay, 0.25, img, 0.75, 0)
     cv2.polylines(img, [pts], True, (60, 60, 230), 3)
+    if zone.get("entry_line"):
+        (lx1, ly1), (lx2, ly2) = zone["entry_line"]
+        cv2.line(img, (int(lx1 * w), int(ly1 * h)), (int(lx2 * w), int(ly2 * h)), (21, 204, 250), 4)
     for b in boxes:
         x1, y1, x2, y2 = (int(v) for v in b)
         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 3)

@@ -238,7 +238,7 @@ export async function downloadAlertClip(id, filename) {
 export const intrusionApi = {
   zones: (cameraId) => request(`/intrusion/zones${cameraId ? `?camera_id=${cameraId}` : ""}`),
   createZone: ({ cameraId, name, polygon, from, to, zoneType = "restricted", dwellSeconds = null, graceSeconds = null, severity = null,
-    alertsEnabled = true, area = "", isEntryGate = false }) =>
+    alertsEnabled = true, area = "", isEntryGate = false, entryLine = null, insideSign = 1 }) =>
     request("/intrusion/zones", {
       method: "POST",
       body: JSON.stringify({
@@ -254,6 +254,8 @@ export const intrusionApi = {
         alerts_enabled: alertsEnabled,
         area: area || null,
         is_entry_gate: isEntryGate,
+        entry_line: isEntryGate ? entryLine : null,
+        inside_sign: insideSign,
       }),
     }),
   updateZone: (id, fields) => request(`/intrusion/zones/${id}`, { method: "PATCH", body: JSON.stringify(fields) }),
