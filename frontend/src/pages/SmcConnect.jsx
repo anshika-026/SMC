@@ -4,11 +4,12 @@ import * as api from "../api/client";
 import WhatsAppIcon from "../components/connect/WhatsAppIcon";
 import ConnectWizard from "../components/connect/ConnectWizard";
 import { HistoryPanel, RecipientsPanel, RulesPanel, TemplatesPanel } from "../components/connect/Panels";
-import { COUNTRY_CODES, DarkModal, Label, MsgBadge, Panel, StatusPill, btnDanger, btnGhost, btnPrimary, field } from "../components/connect/ui";
+import { DarkModal, Label, MsgBadge, Panel, StatusPill, btnDanger, btnGhost, btnPrimary, field } from "../components/connect/ui";
 
 // SMC Connect: WhatsApp Business notifications (backend/app/whatsapp.py). Opened from the profile
 // menu. Every number here comes from the backend: connection only when Meta confirmed it, delivery
-// counts from Meta's own status callbacks, and Demo mode when the server has no credentials.
+// counts from Meta's own status callbacks, and Demo mode when the server has neither Embedded
+// Signup nor manual credentials set up.
 
 const TABS = [
   ["rules", "Notification rules"],
@@ -97,7 +98,8 @@ export default function SmcConnect() {
         <Stat icon={WhatsAppIcon} label="WhatsApp" value={c ? <StatusPill status={c.status} /> : "…"} sub={c?.checked_at ? `checked ${when(c.checked_at)}` : "never checked"} />
         <Stat icon={Phone} label="Business number" value={c?.business_number || "—"} sub={connected ? c.verified_name : c?.entered_number ? `entered +${c.entered_number}, not verified` : "not set"} />
         <Stat icon={Building2} label="Meta Business Account" value={connected ? (c.business_account?.review_status || (c.business_account ? "Unknown" : "Not set")) : "—"} sub={connected ? c.business_account?.name || "account id not configured" : "not connected"} />
-        <Stat icon={Send} label="Notifications sent" value={s ? s.sent : "…"} sub={s?.not_sent ? `${s.not_sent} not sent (not connected)` : "accepted by Meta"} />
+        <Stat icon={Send} label="Notifications sent" value={s ? s.sent : "…"}
+          sub={s?.pending ? `${s.pending} waiting to send` : s?.not_sent ? `${s.not_sent} not sent (see history)` : "accepted by Meta"} />
         <Stat icon={CheckCheck} label="Delivered / failed" value={s ? <span>{s.delivered} <span className="text-slate-500">/</span> <span className={s.failed ? "text-rose-300" : ""}>{s.failed}</span></span> : "…"} sub={s ? `${s.read} read` : ""} />
         <Stat icon={Clock3} label="Last successful" value={s?.last_success ? when(s.last_success.ts) : "—"} sub={s?.last_success ? `${s.last_success.event_label} → ${s.last_success.recipient_name}` : "none yet"} />
       </div>
@@ -113,11 +115,11 @@ export default function SmcConnect() {
       </div>
 
       {tab === "rules" && <RulesPanel rules={rules} recipients={recipients} onError={setError} onSaved={(r) => setRules((rs) => rs.map((x) => (x.key === r.key ? r : x)))} />}
-      {tab === "recipients" && <RecipientsPanel recipients={recipients} onError={setError} onChanged={load} />}
-      {tab === "templates" && <TemplatesPanel rules={rules} onError={setError} onSaved={(r) => setRules((rs) => rs.map((x) => (x.key === r.key ? r : x)))} />}
+      {tab === "recipients" && <RecipientsPanel recipients={recipients} methods={overview?.opt_in_methods || {}} onError={setError} onChanged={load} />}
+      {tab === "templates" && <TemplatesPanel rules={rules} connected={connected} onError={setError} onSaved={(r) => setRules((rs) => rs.map((x) => (x.key === r.key ? r : x)))} />}
       {tab === "history" && <HistoryPanel rules={rules} refreshKey={historyKey} />}
 
-      <ConnectWizard open={wizard} connection={c} onClose={() => { setWizard(false); load(); }} onChanged={setConnection} />
+      <ConnectWizard open={wizard} connection={c} signup={overview?.embedded_signup} onClose={() => { setWizard(false); load(); }} onChanged={setConnection} />
       <TestDialog open={testOpen} rules={rules} recipients={recipients} connection={c} onClose={() => { setTestOpen(false); load(); }} />
     </div>
   );
@@ -135,12 +137,10 @@ function Stat({ icon: Icon, label, value, sub }) {
   );
 }
 
-// Sends one real test message; shows only what the backend reports.
+// Sends one real test message to an opted-in recipient; shows only what the backend reports.
 function TestDialog({ open, rules, recipients, connection, onClose }) {
-  const [to, setTo] = useState("recipient");
+  const allowed = recipients.filter((r) => r.opt_in.status === "opted_in");
   const [rid, setRid] = useState("");
-  const [cc, setCc] = useState("+91");
-  const [number, setNumber] = useState("");
   const [eventKey, setEventKey] = useState("daily_summary");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
@@ -150,8 +150,7 @@ function TestDialog({ open, rules, recipients, connection, onClose }) {
     if (open) {
       setResult(null);
       setError("");
-      setRid(recipients[0]?.id ?? "");
-      setTo(recipients.length ? "recipient" : "number");
+      setRid(recipients.find((r) => r.opt_in.status === "opted_in")?.id ?? "");
     }
   }, [open, recipients]);
 
@@ -160,8 +159,7 @@ function TestDialog({ open, rules, recipients, connection, onClose }) {
     setError("");
     setResult(null);
     try {
-      const body = to === "recipient" ? { recipient_id: Number(rid), event_key: eventKey } : { country_code: cc, number, event_key: eventKey };
-      setResult(await api.connectApi.test(body));
+      setResult(await api.connectApi.test({ recipient_id: Number(rid), event_key: eventKey }));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -169,29 +167,22 @@ function TestDialog({ open, rules, recipients, connection, onClose }) {
     }
   }
 
+  const rule = rules.find((r) => r.key === eventKey);
+  const rec = recipients.find((r) => r.id === Number(rid));
   return (
     <DarkModal open={open} onClose={onClose} title="Send test notification">
       <div className="space-y-4 text-sm">
-        <div className="flex gap-1 rounded-xl bg-white/[0.04] p-1 w-fit">
-          {[["recipient", "A recipient"], ["number", "Another number"]].map(([k, l]) => (
-            <button key={k} type="button" disabled={k === "recipient" && !recipients.length} onClick={() => setTo(k)}
-              className={`rounded-lg px-3 py-1.5 text-xs disabled:opacity-40 ${to === k ? "bg-white text-[#0b1020] font-medium" : "text-slate-400"}`}>{l}</button>
-          ))}
-        </div>
-        {to === "recipient" ? (
+        {allowed.length === 0 ? (
+          <p className="rounded-xl bg-amber-500/10 ring-1 ring-amber-400/30 px-3 py-2 text-xs text-amber-100">
+            Tests go only to recipients who agreed to receive WhatsApp messages. Add a recipient and record their consent first (Recipients tab).
+          </p>
+        ) : (
           <label className="block">
-            <Label>Recipient</Label>
+            <Label>Recipient (opted in)</Label>
             <select value={rid} onChange={(e) => setRid(e.target.value)} className={field}>
-              {recipients.map((r) => <option key={r.id} value={r.id} className="bg-[#0f1528]">{r.name} · {r.role} · {r.phone_masked}</option>)}
+              {allowed.map((r) => <option key={r.id} value={r.id} className="bg-[#0f1528]">{r.name} · {r.role} · {r.phone_masked}</option>)}
             </select>
           </label>
-        ) : (
-          <div className="grid grid-cols-[110px_1fr] gap-3">
-            <label className="block"><Label>Code</Label>
-              <select value={cc} onChange={(e) => setCc(e.target.value)} className={field}>{COUNTRY_CODES.map(([x]) => <option key={x} className="bg-[#0f1528]">{x}</option>)}</select>
-            </label>
-            <label className="block"><Label>Phone number</Label><input inputMode="tel" value={number} onChange={(e) => setNumber(e.target.value)} className={field} /></label>
-          </div>
         )}
         <label className="block">
           <Label>Sample message</Label>
@@ -201,6 +192,11 @@ function TestDialog({ open, rules, recipients, connection, onClose }) {
         </label>
         {connection && connection.status !== "connected" && (
           <p className="text-xs text-amber-200/90">WhatsApp is not connected, so the test will be logged as Not sent.</p>
+        )}
+        {connection?.status === "connected" && rule && rec && !rule.meta_template?.usable && !rec.window_open && (
+          <p className="text-xs text-amber-200/90">
+            {rule.label} has no approved WhatsApp template and {rec.name} hasn't messaged your WhatsApp number in the last 24 hours, so Meta won't accept it. Link a template (Message templates tab) or ask {rec.name} to send any message first.
+          </p>
         )}
         {error && <p className="text-xs text-rose-300">{error}</p>}
         {result && (
@@ -215,7 +211,7 @@ function TestDialog({ open, rules, recipients, connection, onClose }) {
         )}
         <div className="flex justify-end gap-2">
           <button type="button" className={btnGhost} onClick={onClose}>Close</button>
-          <button type="button" className={btnPrimary} disabled={busy || (to === "recipient" ? !rid : !number.trim())} onClick={send}>
+          <button type="button" className={btnPrimary} disabled={busy || !rid} onClick={send}>
             {busy ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Send test
           </button>
         </div>

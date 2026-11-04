@@ -48,7 +48,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("purge-sessions")
     sub.add_parser("check-config")
     sub.add_parser("retention")
+    sub.add_parser("generate-credentials-key")
     args = parser.parse_args(argv)
+
+    if args.cmd == "generate-credentials-key":
+        from app import credential_store
+
+        # Printed once for the operator to put in SMC_CREDENTIALS_KEY; never stored by SMC.
+        print(credential_store.generate_key())
+        return 0
 
     if args.cmd == "check-config":
         problems = config.validate()

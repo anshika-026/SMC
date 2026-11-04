@@ -13,11 +13,13 @@ export const STATUS = {
 };
 
 export const MSG_STATUS = {
+  queued: { label: "Queued", cls: "bg-indigo-500/15 text-indigo-200", hint: "Waiting for the sender (a few seconds)" },
+  retrying: { label: "Retrying", cls: "bg-amber-500/15 text-amber-300", hint: "Meta was busy or unreachable; SMC tries again" },
   sent: { label: "Sent", cls: "bg-sky-500/15 text-sky-300", hint: "Accepted by Meta" },
   delivered: { label: "Delivered", cls: "bg-emerald-500/15 text-emerald-300", hint: "Delivered to the phone" },
   read: { label: "Read", cls: "bg-emerald-500/25 text-emerald-200", hint: "Opened by the recipient" },
   failed: { label: "Failed", cls: "bg-rose-500/15 text-rose-300", hint: "Meta could not send it" },
-  not_sent: { label: "Not sent", cls: "bg-slate-500/20 text-slate-300", hint: "WhatsApp was not connected" },
+  not_sent: { label: "Not sent", cls: "bg-slate-500/20 text-slate-300", hint: "Held back by SMC; the reason is in the details" },
 };
 
 export function StatusPill({ status }) {

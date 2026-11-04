@@ -1270,8 +1270,10 @@ export async function getFootfallDay(date) {
 }
 // ---- SMC Connect: WhatsApp Business notifications (backend/app/whatsapp.py) -----------------
 // Credentials stay on the server; these calls only read status and manage rules / recipients.
+// embeddedSignup hands Meta's 30-second code to the server, which exchanges and stores the token.
 export const connectApi = {
   overview: () => request("/connect/overview"),
+  embeddedSignup: (body) => request("/connect/embedded-signup", { method: "POST", body: JSON.stringify(body) }),
   connect: (countryCode, number) => request("/connect/connect", { method: "POST", body: JSON.stringify({ country_code: countryCode, number }) }),
   verify: () => request("/connect/verify", { method: "POST" }),
   disconnect: () => request("/connect/disconnect", { method: "POST" }),
@@ -1279,6 +1281,10 @@ export const connectApi = {
   addRecipient: (r) => request("/connect/recipients", { method: "POST", body: JSON.stringify(r) }),
   updateRecipient: (id, f) => request(`/connect/recipients/${id}`, { method: "PATCH", body: JSON.stringify(f) }),
   deleteRecipient: (id) => request(`/connect/recipients/${id}`, { method: "DELETE" }),
+  optIn: (id, method) => request(`/connect/recipients/${id}/opt-in`, { method: "POST", body: JSON.stringify({ method, confirmed: true }) }),
+  optOut: (id) => request(`/connect/recipients/${id}/opt-out`, { method: "POST" }),
+  templates: () => request("/connect/templates"),
+  syncTemplates: () => request("/connect/templates/sync", { method: "POST" }),
   rules: () => request("/connect/rules"),
   updateRule: (key, f) => request(`/connect/rules/${key}`, { method: "PATCH", body: JSON.stringify(f) }),
   preview: (key, template) => request("/connect/preview", { method: "POST", body: JSON.stringify({ key, template }) }),
