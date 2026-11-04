@@ -103,7 +103,22 @@ def list_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=2
         raise HTTPException(status_code=422, detail="Dates must look like 2026-11-03")
     if since is not None and until is not None and since >= until:
         raise HTTPException(status_code=422, detail="The start date must be on or before the end date")
-    return {"visits": visitors.list_visits(camera_id, limit, since=since, until=until)}
+    rows = visitors.list_visits(camera_id, limit, since=since, until=until)
+    faces = visitors.faces_during_visits(rows)
+    names: dict[str, str] = {}
+
+    def named(ids: dict) -> list[dict]:
+        out = []
+        for emp, n in sorted(ids.items(), key=lambda x: -x[1]):
+            if emp not in names:
+                names[emp] = (employee_directory.get_employee(emp) or {}).get("name") or emp
+            out.append({"employee_id": emp, "name": names[emp], "faces": n})
+        return out
+
+    for r in rows:
+        f = faces.get(r["visit"]) or {"employees": {}, "possible": {}, "unknown": 0}
+        r["faces_seen"] = {"employees": named(f["employees"]), "possible": named(f["possible"]), "unknown": f["unknown"]}
+    return {"visits": rows}
 
 
 @router.get("/employee-visits")

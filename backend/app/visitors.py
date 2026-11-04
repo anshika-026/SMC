@@ -452,6 +452,39 @@ def employee_stay_snapshots(stays: list[dict]) -> dict[int, list[dict]]:
     return result
 
 
+_VISIT_FACES_SQL = (
+    "SELECT COALESCE(NULLIF(verified_employee_id, ''), NULLIF(employee_id, ''),"
+    " CASE WHEN auto_tier = 'auto' THEN NULLIF(auto_employee_id, '') END) AS emp,"
+    " CASE WHEN auto_tier = 'review' THEN NULLIF(auto_employee_id, '') END AS maybe, COUNT(*) AS n"
+    " FROM face_training_captures WHERE camera_id = ? AND captured_at BETWEEN ? AND ? AND deleted_at IS NULL"
+    " GROUP BY emp, maybe"
+)
+
+
+def faces_during_visits(visits: list[dict]) -> dict[str, dict]:
+    """{visit: {"employees": {id: faces}, "possible": {id: faces}, "unknown": faces}}: the faces the
+    face pipeline captured on the visit's camera while the visit lasted. The two trackers number
+    people differently, so these are faces SEEN at the time (anyone in view), not proof of who sat
+    in the visitor area: a recognised employee there usually means the "visitor" was that
+    employee, unrecognised while seated."""
+    out: dict[str, dict] = {}
+    with _conn() as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'face_training_captures'").fetchone():
+            return out                     # face recognition never ran here: no names to show
+        for v in visits:
+            end = (v.get("last_seen") or v.get("left_at") or time.time()) + _STAY_MARGIN_SECONDS
+            res = {"employees": {}, "possible": {}, "unknown": 0}
+            for r in conn.execute(_VISIT_FACES_SQL, (v["camera_id"], v["arrived_at"] - _STAY_MARGIN_SECONDS, end)):
+                if r["emp"]:
+                    res["employees"][r["emp"]] = res["employees"].get(r["emp"], 0) + r["n"]
+                elif r["maybe"]:
+                    res["possible"][r["maybe"]] = res["possible"].get(r["maybe"], 0) + r["n"]
+                else:
+                    res["unknown"] += r["n"]
+            out[v["visit"]] = res
+    return out
+
+
 def get_employee_visit(stay_id: int) -> dict | None:
     with _conn() as conn:
         r = conn.execute("SELECT id FROM visitor_area_employee_log WHERE id = ?", (stay_id,)).fetchone()
