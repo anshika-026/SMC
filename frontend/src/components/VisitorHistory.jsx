@@ -3,8 +3,17 @@ import { Film } from "lucide-react";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
 import { fmtDateTime, fmtTime } from "./VisitorAlerts";
+import { shiftIso, todayIso } from "./workforce/shared";
 
 const REFRESH_MS = 15_000;
+
+// Quick ranges for the calendar; "All time" leaves both dates empty.
+const RANGES = [
+  ["today", "Today", () => [todayIso(), todayIso()]],
+  ["7", "Last 7 days", () => [shiftIso(todayIso(), -6), todayIso()]],
+  ["30", "Last 30 days", () => [shiftIso(todayIso(), -29), todayIso()]],
+  ["all", "All time", () => ["", ""]],
+];
 
 export function fmtDuration(seconds) {
   const s = Math.max(0, Math.round(seconds || 0));
@@ -21,16 +30,26 @@ export default function VisitorHistory({ cameras, onOpenEvent }) {
   const [rows, setRows] = useState(null);
   const [error, setError] = useState("");
   const [cameraId, setCameraId] = useState(0);
+  const [range, setRange] = useState("all");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
 
   const load = useCallback(() => {
     return api
-      .getVisitorVisits({ cameraId, limit: 200 })
+      .getVisitorVisits({ cameraId, limit: 2000, start: from, end: to })
       .then((d) => {
         setRows(d.visits || []);
         setError("");
       })
       .catch((e) => setError(e.message));
-  }, [cameraId]);
+  }, [cameraId, from, to]);
+
+  function pick(key) {
+    const [f, t] = RANGES.find(([k]) => k === key)[2]();
+    setRange(key);
+    setFrom(f);
+    setTo(t);
+  }
 
   useEffect(() => {
     load();
@@ -43,7 +62,10 @@ export default function VisitorHistory({ cameras, onOpenEvent }) {
       <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
         <div>
           <h3 className="text-sm font-semibold text-ink-900">Visitor history</h3>
-          <p className="text-xs text-slate-500">One row per visit. Registered employees are not included.</p>
+          <p className="text-xs text-slate-500">
+            One row per visit. Registered employees are not included.
+            {rows && ` ${rows.length} visit${rows.length === 1 ? "" : "s"}${from || to ? " in this period" : " in total"}.`}
+          </p>
         </div>
         <select className="input-field !w-auto text-xs" value={cameraId || ""} onChange={(e) => setCameraId(e.target.value ? Number(e.target.value) : 0)}>
           <option value="">All cameras</option>
@@ -54,9 +76,26 @@ export default function VisitorHistory({ cameras, onOpenEvent }) {
           ))}
         </select>
       </div>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        {RANGES.map(([k, label]) => (
+          <button key={k} type="button" onClick={() => pick(k)}
+            className={`px-3 py-1 rounded-full text-xs font-medium ${range === k ? "bg-brand-500 text-white" : "bg-white border border-border-200 text-slate-600 hover:text-ink-900"}`}>
+            {label}
+          </button>
+        ))}
+        <span className="flex items-center gap-1.5 text-xs text-slate-500 ml-auto">
+          <input type="date" aria-label="From" className="input-field !w-auto !py-1.5 text-xs" value={from} max={to || todayIso()}
+            onChange={(e) => { setRange(""); setFrom(e.target.value); }} />
+          to
+          <input type="date" aria-label="To" className="input-field !w-auto !py-1.5 text-xs" value={to} min={from || undefined} max={todayIso()}
+            onChange={(e) => { setRange(""); setTo(e.target.value); }} />
+        </span>
+      </div>
       {error && <p className="text-xs text-danger-600 mb-2">Could not load visitor history: {error}</p>}
       {!rows && !error && <p className="text-sm text-slate-400 py-6 text-center">Loading visitor history…</p>}
-      {rows && rows.length === 0 && <p className="text-sm text-slate-400 py-6 text-center">No visitor visits recorded yet.</p>}
+      {rows && rows.length === 0 && (
+        <p className="text-sm text-slate-400 py-6 text-center">{from || to ? "No visitor visits in this period." : "No visitor visits recorded yet."}</p>
+      )}
       {rows && rows.length > 0 && (
         <div className="overflow-x-auto">
           <table className="data-table">

@@ -17,6 +17,8 @@ Visitor Management API (admin only; see visitors.py for the rules).
 
 from __future__ import annotations
 
+import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -89,9 +91,19 @@ def visitor_kpis():
 
 
 @router.get("/visits")
-def list_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=500)):
-    """Visitor history, one row per visit (repeat alerts grouped)."""
-    return {"visits": visitors.list_visits(camera_id, limit)}
+def list_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=2000),
+                start: str | None = None, end: str | None = None):
+    """Visitor history, one row per visit (repeat alerts grouped). start / end
+    (YYYY-MM-DD, both included) limit it to those days."""
+    try:
+        since = datetime.datetime.combine(datetime.date.fromisoformat(start), datetime.time.min).timestamp() if start else None
+        until = (datetime.datetime.combine(datetime.date.fromisoformat(end) + datetime.timedelta(days=1), datetime.time.min).timestamp()
+                 if end else None)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Dates must look like 2026-11-03")
+    if since is not None and until is not None and since >= until:
+        raise HTTPException(status_code=422, detail="The start date must be on or before the end date")
+    return {"visits": visitors.list_visits(camera_id, limit, since=since, until=until)}
 
 
 @router.get("/employee-visits")

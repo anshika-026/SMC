@@ -1147,9 +1147,11 @@ export async function getVisitorSettings() {
 export async function getVisitorKpis() {
   return request("/visitors/kpis");
 }
-export async function getVisitorVisits({ cameraId, limit = 100 } = {}) {
+export async function getVisitorVisits({ cameraId, limit = 100, start, end } = {}) {
   const q = new URLSearchParams({ limit: String(limit) });
   if (cameraId) q.set("camera_id", String(cameraId));
+  if (start) q.set("start", start);
+  if (end) q.set("end", end);
   return request(`/visitors/visits?${q}`);
 }
 export async function getVisitorAreaEmployeeVisits({ cameraId, limit = 100 } = {}) {
