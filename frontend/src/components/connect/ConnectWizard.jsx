@@ -43,7 +43,24 @@ function Steps({ steps, step }) {
   );
 }
 
-function Result({ result, onRetry, onClose }) {
+const NOT_CONNECTED_TITLE = {
+  not_configured: "Not configured on the server",
+  configured: "Not confirmed by Meta",
+  connection_failed: "Connection failed",
+};
+
+// The outcome of a check. Try again asks the backend to check with Meta again (POST /verify);
+// it never decides the status itself.
+function Result({ result, onRetry, onClose, error, extra }) {
+  const [busy, setBusy] = useState(false);
+  async function retry() {
+    setBusy(true);
+    try {
+      await onRetry();
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <div className="space-y-4 text-sm">
       {result.status === "connected" ? (
@@ -54,14 +71,20 @@ function Result({ result, onRetry, onClose }) {
         </div>
       ) : (
         <div className="rounded-xl bg-rose-500/10 ring-1 ring-rose-400/30 p-4 space-y-1">
-          <p className="font-medium text-rose-200 flex items-center gap-2"><XCircle size={16} /> Not connected</p>
+          <p className="font-medium text-rose-200 flex items-center gap-2"><XCircle size={16} /> {NOT_CONNECTED_TITLE[result.state] || "Not connected"}</p>
           <p className="text-slate-300">{result.last_error || "Meta did not confirm this number."}</p>
         </div>
       )}
-      <div className="flex items-center justify-between">
-        <StatusPill status={result.status} />
+      {error && <p className="text-xs text-rose-300">{error}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <StatusPill status={result.state || result.status} />
         <div className="flex gap-2">
-          {result.status !== "connected" && <button type="button" className={btnGhost} onClick={onRetry}>Try again</button>}
+          {extra}
+          {result.status !== "connected" && (
+            <button type="button" className={btnGhost} disabled={busy} onClick={retry}>
+              {busy && <Loader2 size={14} className="animate-spin" />} {busy ? "Checking with Meta…" : "Try again"}
+            </button>
+          )}
           <button type="button" className={btnPrimary} onClick={onClose}>Done</button>
         </div>
       </div>
@@ -93,7 +116,24 @@ function EmbeddedFlow({ signup, onChanged, onClose, onManual }) {
     }
   }
 
-  if (result) return (<><Steps steps={["Meta sign-in", "Connected"]} step={1} /><Result result={result} onRetry={() => setResult(null)} onClose={onClose} /></>);
+  async function recheck() {
+    setError("");
+    try {
+      const c = await api.connectApi.verify();
+      onChanged(c);
+      setResult(c);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  if (result) return (
+    <>
+      <Steps steps={["Meta sign-in", "Connected"]} step={1} />
+      <Result result={result} onRetry={recheck} onClose={onClose} error={error}
+        extra={result.status !== "connected" && <button type="button" className={btnGhost} onClick={() => { setError(""); setResult(null); }}>Sign in again</button>} />
+    </>
+  );
   return (
     <div className="space-y-4 text-sm">
       <Steps steps={["Meta sign-in", "Connected"]} step={0} />
@@ -207,7 +247,8 @@ function ManualFlow({ connection, onChanged, onClose, onEmbedded }) {
           </div>
           {!connection?.setup?.manual && (
             <p className="rounded-xl bg-indigo-500/10 ring-1 ring-indigo-400/30 px-3 py-2 text-xs text-indigo-200">
-              The server has no WhatsApp credentials yet, so verification will report Not connected.
+              Not configured: {(connection?.setup?.manual_missing || []).join(" and ")} {(connection?.setup?.manual_missing || []).length === 1 ? "is" : "are"} not set
+              in backend/.env on the server. Verification will report Not configured until they are set and SMC is restarted.
             </p>
           )}
           {error && <p className="text-xs text-rose-300">{error}</p>}
@@ -219,7 +260,7 @@ function ManualFlow({ connection, onChanged, onClose, onEmbedded }) {
           </div>
         </div>
       )}
-      {step === 2 && result && <Result result={result} onRetry={() => setStep(1)} onClose={onClose} />}
+      {step === 2 && result && <Result result={result} onRetry={() => call(api.connectApi.verify, 2)} onClose={onClose} error={error} />}
     </>
   );
 }

@@ -5,7 +5,20 @@ footfall and daily summaries) to WhatsApp through Meta's **WhatsApp Cloud API**.
 everything that must be configured outside SMC. Nothing here can be done by SMC itself: it needs
 your Meta business accounts.
 
-Until one of the two setups below is complete, SMC Connect shows **Demo mode** and sends nothing.
+Until one of the two setups below is complete, SMC Connect shows **Not configured** and sends nothing.
+
+The connection shows one of four states (the `state` field of `GET /api/connect/overview`):
+
+| State | Meaning |
+|---|---|
+| **Not configured** | The server has neither the manual credentials nor Embedded Signup set up. The page names the missing variables. |
+| **Configured** | The server has what it needs, but Meta has not confirmed it (never checked, or the credentials changed since the last check). Nothing is sent. |
+| **Connected** | At the last check Meta answered for this phone number with these credentials. Having the variables set is never enough. |
+| **Connection failed** | Meta (or the network) refused the last check, or rejected the token while sending. The page shows Meta's reason. **Try again** asks Meta again. |
+
+Tokens, the app secret and the encryption key never appear in any API response or in the browser.
+The backend reads `backend/.env` only when it starts: restart SMC after changing it (in Docker:
+`docker restart smc-backend`; the file is mounted into the container read-only).
 
 | Setup | Who connects WhatsApp | Credentials live in |
 |---|---|---|
@@ -81,6 +94,8 @@ phone number. Your Meta app then acts as a **Tech Provider**.
    ```
 5. In SMC Connect → **Connect WhatsApp Business**: enter the number, then **Verify with Meta**.
    SMC shows **Connected** only when Meta answers for that number with that token.
+   `WHATSAPP_ACCESS_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` are required; the business-account id is
+   needed to sync message templates.
 
 ## Message templates (required for alerts and reports)
 

@@ -87,6 +87,8 @@ OPT_IN_WORDS = {"START", "SUBSCRIBE"}
 # Meta error codes worth retrying: throttling / temporary unavailability.
 # (developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes)
 TRANSIENT_CODES = {1, 2, 4, 17, 341, 80007, 130429, 131000, 131016, 131056, 133004}
+# Meta OAuthException: the access token is invalid, expired or revoked.
+TOKEN_REJECTED = 190
 
 # The notification rules: key -> (label, kind, default priority, default text, sample values).
 EVENTS = {
@@ -340,11 +342,19 @@ def mask(phone: str | None) -> str:
 
 # ---- credentials and connection -----------------------------------------------------------------
 
+# Manual setup: the environment variables it needs (WHATSAPP_BUSINESS_ACCOUNT_ID is optional).
+MANUAL_ENV = ("WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID")
+
+
+def manual_missing() -> list[str]:
+    return [n for n in MANUAL_ENV if not os.environ.get(n, "").strip()]
+
+
 def _env_credentials() -> dict | None:
-    token, pnid = os.environ.get("WHATSAPP_ACCESS_TOKEN", ""), os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+    token, pnid = os.environ.get("WHATSAPP_ACCESS_TOKEN", "").strip(), os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "").strip()
     if not (token and pnid):
         return None
-    return {"token": token, "phone_number_id": pnid, "waba_id": os.environ.get("WHATSAPP_BUSINESS_ACCOUNT_ID", ""), "mode": "manual"}
+    return {"token": token, "phone_number_id": pnid, "waba_id": os.environ.get("WHATSAPP_BUSINESS_ACCOUNT_ID", "").strip(), "mode": "manual"}
 
 
 def embedded_signup_config() -> dict:
@@ -398,23 +408,40 @@ def _has_credentials(c: dict) -> bool:
     return _env_credentials() is not None
 
 
+def _state(status: str, demo: bool) -> str:
+    """The four states the page shows: not_configured (no credentials and no Embedded Signup on the
+    server), configured (can be checked, not confirmed by Meta), connected (Meta confirmed it at the
+    last check), connection_failed (Meta, or the network, refused the last check or send)."""
+    if demo:
+        return "not_configured"
+    return {"connected": "connected", "failed": "connection_failed"}.get(status, "configured")
+
+
 def connection() -> dict:
-    """What the page shows. Never says connected unless Meta confirmed it; never contains a token."""
+    """What the page shows. Never says connected unless Meta confirmed it with the credentials the
+    server has now; never contains a token."""
     c = _row()
     es = embedded_signup_config()
     configured = _has_credentials(c)
+    env = _env_credentials()
     demo = not configured and not es["available"]
     status = c.get("status") or "not_connected"
+    last_error = c.get("last_error")
+    if status == "connected" and (not configured or (c.get("mode") != "embedded_signup" and c.get("phone_number_id") != env["phone_number_id"])):
+        # Meta confirmed credentials the server no longer has: unconfirmed until checked again.
+        status, last_error = "not_connected", "The WhatsApp credentials on the server changed since Meta confirmed them. Check the connection again."
     if demo:
         status = "not_configured"
     connected = status == "connected"
     acct = c.get("account") or {}
     return {
+        "state": _state(status, demo),        # not_configured | configured | connected | connection_failed
         "status": status,                     # not_configured | not_connected | pending | connected | failed | disconnected
         "mode": c.get("mode") or "manual",    # manual (environment) | embedded_signup
         "configured": configured,
         "demo_mode": demo,
-        "setup": {"embedded_signup": es["available"], "embedded_signup_missing": es["missing"], "manual": _env_credentials() is not None},
+        "setup": {"embedded_signup": es["available"], "embedded_signup_missing": es["missing"],
+                  "manual": env is not None, "manual_missing": manual_missing()},
         "entered_number": c.get("entered_number"),
         "business_number": c.get("display_phone_number") if connected else None,
         "verified_name": c.get("verified_name") if connected else None,
@@ -422,7 +449,7 @@ def connection() -> dict:
         "business_account": ({"name": acct.get("name"), "review_status": acct.get("review_status")} if connected and acct else None),
         "checked_at": c.get("checked_at"),
         "connected_at": c.get("connected_at") if connected else None,
-        "last_error": c.get("last_error"),
+        "last_error": last_error,
     }
 
 
@@ -459,8 +486,9 @@ def verify() -> dict:
     try:
         cred = _credentials(c)
     except NotConfigured as e:
-        _save(org, status="not_connected", last_error=f"{e} (Demo mode)." if not embedded_signup_config()["available"] else str(e),
-              checked_at=time.time())
+        missing = manual_missing() if c.get("mode") != "embedded_signup" else []
+        _save(org, status="not_connected", checked_at=time.time(),
+              last_error=f"Not configured: {e}. Set {' and '.join(missing)} in backend/.env, then restart SMC." if missing else f"{e}.")
         return connection()
     except credential_store.Undecryptable as e:
         return _fail(org, f"{e}. Connect again with Meta.")
@@ -921,6 +949,8 @@ def deliver(mid: int, now: float | None = None) -> dict | None:
                 _finish(mid, "retrying", now, error=f"{e} (attempt {attempts} of {MAX_ATTEMPTS}; retrying)", attempts=attempts, next_at=now + wait)
             else:
                 _finish(mid, "failed", now, error=str(e), attempts=attempts)
+            if e.code == TOKEN_REJECTED or e.http_status == 401:
+                _fail(org, f"Meta rejected the access token: {e}")
             log.warning("smc-connect: message %s: %s", mid, e)
         except (NotConfigured, credential_store.Undecryptable, credential_store.NotConfigured) as e:
             _finish(mid, "failed", now, error=str(e), attempts=attempts)

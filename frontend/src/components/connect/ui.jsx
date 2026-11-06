@@ -3,13 +3,17 @@ import { X } from "lucide-react";
 // Dark-theme building blocks for SMC Connect (the rest of SMC is light; this page is a dark
 // "control room" panel inside the normal layout, using the same brand tokens).
 
+// Keys are the backend's connection "state" (not_configured | configured | connected |
+// connection_failed); the older detailed statuses stay as fallbacks.
 export const STATUS = {
   connected: { label: "Connected", cls: "bg-emerald-500/15 text-emerald-300 ring-emerald-400/30", dot: "bg-emerald-400" },
+  configured: { label: "Configured", cls: "bg-sky-500/15 text-sky-300 ring-sky-400/30", dot: "bg-sky-400" },
+  connection_failed: { label: "Connection failed", cls: "bg-rose-500/15 text-rose-300 ring-rose-400/30", dot: "bg-rose-400" },
   pending: { label: "Waiting for verification", cls: "bg-amber-500/15 text-amber-300 ring-amber-400/30", dot: "bg-amber-400" },
   failed: { label: "Verification failed", cls: "bg-rose-500/15 text-rose-300 ring-rose-400/30", dot: "bg-rose-400" },
   disconnected: { label: "Disconnected", cls: "bg-slate-500/15 text-slate-300 ring-slate-400/30", dot: "bg-slate-400" },
   not_connected: { label: "Not connected", cls: "bg-slate-500/15 text-slate-300 ring-slate-400/30", dot: "bg-slate-400" },
-  not_configured: { label: "Demo mode", cls: "bg-indigo-500/15 text-indigo-200 ring-indigo-400/30", dot: "bg-indigo-400" },
+  not_configured: { label: "Not configured", cls: "bg-indigo-500/15 text-indigo-200 ring-indigo-400/30", dot: "bg-indigo-400" },
 };
 
 export const MSG_STATUS = {
