@@ -8,7 +8,7 @@ import { DarkModal, Label, MsgBadge, Panel, StatusPill, btnDanger, btnGhost, btn
 
 // SMC Connect: WhatsApp Business notifications (backend/app/whatsapp.py). Opened from the profile
 // menu. Every number here comes from the backend: connection only when Meta confirmed it, delivery
-// counts from Meta's own status callbacks, and Demo mode when the server has neither Embedded
+// counts from Meta's own status callbacks, and Not configured when the server has neither Embedded
 // Signup nor manual credentials set up.
 
 const TABS = [
@@ -68,7 +68,7 @@ export default function SmcConnect() {
           <h1 className="text-xl font-semibold text-white tracking-tight">SMC Connect</h1>
           <p className="text-sm text-slate-400">WhatsApp Business notifications for security, visitors, attendance and daily reports.</p>
         </div>
-        {c && <StatusPill status={c.status} />}
+        {c && <StatusPill status={c.state || c.status} />}
         <div className="flex flex-wrap gap-2">
           {connected ? (
             <>
@@ -91,11 +91,17 @@ export default function SmcConnect() {
       </div>
 
       {c?.last_error && !c.demo_mode && <p className="rounded-xl bg-rose-500/10 ring-1 ring-rose-400/30 px-4 py-2 text-sm text-rose-200">{c.last_error}</p>}
+      {c?.demo_mode && (
+        <p className="rounded-xl bg-indigo-500/10 ring-1 ring-indigo-400/30 px-4 py-2 text-sm text-indigo-200">
+          Not configured: the server has no WhatsApp Cloud API credentials. Set {c.setup.manual_missing.join(" and ")} (or Embedded Signup:{" "}
+          {c.setup.embedded_signup_missing.join(", ")}) in backend/.env and restart SMC. Nothing is sent until Meta confirms the connection.
+        </p>
+      )}
       {error && <p className="text-sm text-rose-300">{error}</p>}
 
       {/* Overview */}
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-6">
-        <Stat icon={WhatsAppIcon} label="WhatsApp" value={c ? <StatusPill status={c.status} /> : "…"} sub={c?.checked_at ? `checked ${when(c.checked_at)}` : "never checked"} />
+        <Stat icon={WhatsAppIcon} label="WhatsApp" value={c ? <StatusPill status={c.state || c.status} /> : "…"} sub={c?.checked_at ? `checked ${when(c.checked_at)}` : "never checked"} />
         <Stat icon={Phone} label="Business number" value={c?.business_number || "—"} sub={connected ? c.verified_name : c?.entered_number ? `entered +${c.entered_number}, not verified` : "not set"} />
         <Stat icon={Building2} label="Meta Business Account" value={connected ? (c.business_account?.review_status || (c.business_account ? "Unknown" : "Not set")) : "—"} sub={connected ? c.business_account?.name || "account id not configured" : "not connected"} />
         <Stat icon={Send} label="Notifications sent" value={s ? s.sent : "…"}

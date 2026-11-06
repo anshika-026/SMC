@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import os
 import sqlite3
 import time
 
@@ -125,7 +126,9 @@ def test_without_any_setup_it_is_demo_mode_and_nothing_is_sent(isolated_db, monk
     c = whatsapp.start_connect("+91", "98765 43210")
     assert c["status"] == "not_configured" and c["demo_mode"] and not c["setup"]["embedded_signup"]
     c = whatsapp.verify()
-    assert c["status"] == "not_configured" and c["business_number"] is None and "Demo mode" in c["last_error"]
+    assert c["status"] == "not_configured" and c["business_number"] is None
+    assert c["state"] == "not_configured" and c["setup"]["manual_missing"] == ["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"]
+    assert "WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID" in c["last_error"]
     rec = opted_in()
     m = whatsapp.send_test(rec["id"])
     assert m["status"] == "not_sent" and m["error"] == "WhatsApp is not connected"
@@ -146,6 +149,42 @@ def test_manual_setup_is_connected_only_when_meta_confirms_the_same_number(meta)
     assert whatsapp.verify()["status"] == "connected"
     assert whatsapp.disconnect()["status"] == "disconnected"
     assert set(meta.tokens) == {"ENV-TOKEN"}
+
+
+def test_the_four_states_come_from_meta_not_from_the_environment(meta, monkeypatch):
+    c = whatsapp.connection()
+    assert c["state"] == "configured" and c["status"] != "connected"      # credentials exist, not confirmed yet
+    assert connect()["state"] == "connected"
+    meta.fail_info = "Invalid OAuth access token"
+    assert whatsapp.verify()["state"] == "connection_failed"
+    meta.fail_info = None
+    assert whatsapp.verify()["state"] == "connected"
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "333")                 # credentials changed after the check
+    c = whatsapp.connection()
+    assert c["state"] == "configured" and c["business_number"] is None and "changed" in c["last_error"]
+    monkeypatch.delenv("WHATSAPP_PHONE_NUMBER_ID")
+    monkeypatch.delenv("WHATSAPP_ACCESS_TOKEN")
+    assert whatsapp.connection()["state"] == "not_configured"
+
+
+def test_a_token_meta_rejects_while_sending_marks_the_connection_failed(meta):
+    connect()
+    rec = opted_in()
+    inbound(rec["phone"])
+    meta.fail_send = [whatsapp.MetaError("Error validating access token: Session has expired", code=190, http_status=401)]
+    assert whatsapp.send_test(rec["id"])["status"] == "failed"
+    c = whatsapp.connection()
+    assert c["state"] == "connection_failed" and "rejected the access token" in c["last_error"]
+
+
+def test_no_token_or_secret_in_connection_responses(meta, embedded, api, admin_token, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "ENV-TOKEN")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "222")
+    h = bearer(admin_token)
+    bodies = [api.post("/api/connect/verify", headers=h).text, api.get("/api/connect/overview", headers=h).text]
+    assert "connected" in bodies[0]
+    for b in bodies:
+        assert "ENV-TOKEN" not in b and "APP-SECRET" not in b and os.environ["SMC_CREDENTIALS_KEY"] not in b
 
 
 def test_embedded_signup_stores_the_token_encrypted_and_uses_it(embedded, isolated_db):
