@@ -34,7 +34,9 @@ the administrator can see the cameras counted against the limit.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import secrets
 import logging
 import sqlite3
 import threading
@@ -85,6 +87,16 @@ _lock = threading.Lock()
 _ent: dict | None = None        # last entitlement read from the portal
 _fetched_at = 0.0               # when it was read (time.time())
 _last_error: str | None = None
+_failing_since: float | None = None     # first failed refresh of the current outage
+_last_failure_log = 0.0
+
+# The portal's pass opens SMC's login form, it never logs anyone in: it is
+# exchanged for a login ticket, and in portal mode the login form needs that
+# ticket AND a correct SMC email and password.
+LOGIN_TICKET_SECONDS = 300
+LOGIN_TICKET_MAX_ATTEMPTS = 5
+# While the portal is unreachable, log once, then at most this often.
+FAILURE_LOG_INTERVAL_SECONDS = 1800
 _last_reported: str | None = None
 _thread_started = False
 
@@ -109,6 +121,11 @@ def init_db() -> None:
             " id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL, fetched_at REAL NOT NULL)"
         )
         conn.execute("CREATE TABLE IF NOT EXISTS sso_used_tokens (jti TEXT PRIMARY KEY, expires_at REAL NOT NULL)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sso_login_tickets ("
+            " ticket_hash TEXT PRIMARY KEY, license_id TEXT NOT NULL, expires_at REAL NOT NULL,"
+            " attempts INTEGER NOT NULL DEFAULT 0)"
+        )
         row = conn.execute("SELECT payload, fetched_at FROM master_entitlement WHERE id = 1").fetchone()
     if row is not None:
         saved = json.loads(row["payload"])
@@ -171,6 +188,46 @@ def _consume(jti: str, expires_at: float) -> None:
             raise LaunchError("token was already used") from e
 
 
+# --- Login tickets ----------------------------------------------------------------
+
+def _ticket_hash(ticket: str) -> str:
+    return hashlib.sha256(ticket.encode()).hexdigest()
+
+
+def create_login_ticket(claims: dict) -> str:
+    """After a verified pass: a random ticket the login form must send with the
+    SMC email and password. Stored only as a hash; LOGIN_TICKET_SECONDS long."""
+    ticket = secrets.token_urlsafe(32)
+    now = time.time()
+    with _conn() as conn:
+        conn.execute("DELETE FROM sso_login_tickets WHERE expires_at < ?", (now,))
+        conn.execute("INSERT INTO sso_login_tickets (ticket_hash, license_id, expires_at) VALUES (?, ?, ?)",
+                     (_ticket_hash(ticket), claims["sub"], now + LOGIN_TICKET_SECONDS))
+    return ticket
+
+
+def login_ticket_valid(ticket: str | None) -> bool:
+    """Is this a live ticket for this deployment's license with attempts left?"""
+    if not ticket or not isinstance(ticket, str) or len(ticket) > 128:
+        return False
+    with _conn() as conn:
+        row = conn.execute("SELECT license_id, expires_at, attempts FROM sso_login_tickets WHERE ticket_hash = ?",
+                           (_ticket_hash(ticket),)).fetchone()
+    return bool(row and row["license_id"] == config.MASTER_LICENSE_ID and row["expires_at"] >= time.time()
+                and row["attempts"] < LOGIN_TICKET_MAX_ATTEMPTS)
+
+
+def login_ticket_failed(ticket: str) -> None:
+    with _conn() as conn:
+        conn.execute("UPDATE sso_login_tickets SET attempts = attempts + 1 WHERE ticket_hash = ?", (_ticket_hash(ticket),))
+
+
+def use_login_ticket(ticket: str) -> None:
+    """A successful login spends the ticket."""
+    with _conn() as conn:
+        conn.execute("DELETE FROM sso_login_tickets WHERE ticket_hash = ?", (_ticket_hash(ticket),))
+
+
 # --- Entitlement ------------------------------------------------------------------
 
 def _call(method: str, path: str, body: dict | None = None) -> dict:
@@ -196,31 +253,48 @@ def _store(ent: dict, fetched_at: float) -> None:
         )
 
 
+def _refresh_failed(message: str) -> None:
+    """Records a failed refresh. Logged when an outage starts, then at most every
+    FAILURE_LOG_INTERVAL_SECONDS with how long it has lasted and when SMC locks."""
+    global _last_error, _failing_since, _last_failure_log
+    now = time.time()
+    _last_error = message
+    if _failing_since is None:
+        _failing_since = now
+    if now - _last_failure_log >= FAILURE_LOG_INTERVAL_SECONDS:
+        _last_failure_log = now
+        grace_until = state().get("grace_until")
+        until = (time.strftime("%Y-%m-%d %H:%M", time.localtime(grace_until))
+                 if grace_until and grace_until > now else "now (no valid license on record)")
+        log.warning("license check failing for %.0f min: %s. SMC keeps working until %s, then locks.",
+                    (now - _failing_since) / 60, message, until)
+
+
 def refresh() -> dict | None:
     """Reads the license from the portal now. Returns it, or None (and keeps
     the previous answer) if the portal couldn't be reached or refused."""
-    global _ent, _last_error
+    global _ent, _failing_since, _last_failure_log
     if not enabled():
         return None
     try:
         ent = _call("GET", "/api/integration/entitlement")
     except urllib.error.HTTPError as e:
-        _last_error = f"Master Portal answered {e.code}"
         if e.code in (401, 403):
             # The key was replaced or the license deleted: that is an answer,
             # not an outage, so the grace period must not keep access open.
             with _lock:
                 _ent = None
-        log.warning("entitlement refresh failed: %s", _last_error)
+        _refresh_failed(f"Master Portal answered {e.code}")
         return None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-        _last_error = f"Master Portal unreachable: {e}"
-        log.warning("entitlement refresh failed: %s", _last_error)
+        _refresh_failed(f"Master Portal unreachable: {e}")
         return None
     if ent.get("license_id") != config.MASTER_LICENSE_ID:
-        _last_error = "Master Portal returned a different license than MASTER_LICENSE_ID"
-        log.error(_last_error)
+        _refresh_failed("Master Portal returned a different license than MASTER_LICENSE_ID")
         return None
+    if _failing_since is not None:
+        log.info("license check working again after %.0f min", (time.time() - _failing_since) / 60)
+    _failing_since, _last_failure_log = None, 0.0
     _store(ent, time.time())
     return ent
 
@@ -276,8 +350,33 @@ def feature_allowed(feature: str | None) -> bool:
 
 
 def analytics_allowed(analytics_key: str) -> bool:
-    """For analytics_settings.enabled(): may this processing switch run?"""
+    """For analytics_settings.enabled(): may this processing switch run? Never
+    while the license is suspended, expired or unverified (the pipelines check
+    this per frame, so they pause at once and resume when it is active again;
+    nothing is deleted)."""
+    if license_problem() is not None:
+        return False
     return feature_allowed(ANALYTICS_LICENSE_FEATURE.get(analytics_key))
+
+
+def state() -> dict:
+    """For monitoring (/ready) and the admin banner: standalone | ok | grace |
+    locked. `grace` = the portal can't be reached right now but the last answer
+    is recent enough; SMC keeps working until grace_until."""
+    if not enabled():
+        return {"state": "standalone"}
+    with _lock:
+        fetched_at = _fetched_at
+    grace_until = fetched_at + config.ENTITLEMENT_GRACE_HOURS * 3600 if fetched_at else None
+    problem = license_problem()
+    if problem:
+        st = "locked"
+    elif _failing_since is not None:
+        st = "grace"
+    else:
+        st = "ok"
+    return {"state": st, "checked_at": fetched_at or None, "grace_until": grace_until,
+            "failing_since": _failing_since, "problem": problem, "last_error": _last_error}
 
 
 def require(feature: str):
@@ -304,6 +403,7 @@ def summary() -> dict:
     if not enabled():
         return {"mode": "standalone"}
     ent = entitlement()
+    st = state()
     with _lock:
         fetched_at = _fetched_at
     return {
@@ -319,6 +419,8 @@ def summary() -> dict:
         "company_name": ent.get("company_name") if ent else "",
         "checked_at": fetched_at or None,
         "last_error": _last_error,
+        "state": st["state"],
+        "grace_until": st["grace_until"],
     }
 
 

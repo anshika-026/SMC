@@ -219,6 +219,9 @@ def client_login(payload: ClientLoginIn, request: Request):
     username = payload.username.strip()
     guard = ratelimit.client_login_guard
     guard.check(ip, username)
+    problem = auth.license_lock_reason()          # portal mode only; None standalone
+    if problem:
+        raise HTTPException(status_code=403, detail=problem)
     lic = license_db.verify_license_login(username, payload.password)
     if lic is None:
         guard.failed(ip, username)

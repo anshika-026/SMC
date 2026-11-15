@@ -4,7 +4,8 @@ sso_routes.py
 Sign-in from the Deco Vision Master Portal (see master_link.py):
 
   GET  /api/auth/sso/config   public: is SMC connected, and where clients sign in
-  POST /api/auth/sso          {token}: exchange a launch token for an SMC session
+  POST /api/auth/sso          {token}: exchange a launch token for a login ticket
+                               (the login form then needs it AND an SMC email + password)
 
 The frontend's /sso page reads the token from the URL fragment (#token=...),
 which browsers never send to a server, and posts it here once.
@@ -19,7 +20,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app import audit, auth, config, master_link, ratelimit
+from app import audit, config, master_link, ratelimit
 
 log = logging.getLogger("sso")
 
@@ -62,8 +63,9 @@ def sso_exchange(payload: SsoIn, request: Request):
     problem = master_link.license_problem()
     if problem:
         raise HTTPException(status_code=403, detail=problem)
-    token = auth.create_sso_session(claims)
-    name = claims.get("name") or claims.get("company") or claims.get("username")
-    audit.record("sso.login", {"email": claims.get("username")}, ip=ip, license=claims["sub"])
-    return {"token": token, "name": name, "username": claims.get("username"), "sso": True,
-            "license": master_link.summary()}
+    # The pass proves the license allowed this visit; it does not log anyone in.
+    ticket = master_link.create_login_ticket(claims)
+    audit.record("sso.pass_accepted", {"email": claims.get("launched_by") or claims.get("username")}, ip=ip,
+                 license=claims["sub"], via=claims.get("via") or "client")
+    return {"ticket": ticket, "expires_in": master_link.LOGIN_TICKET_SECONDS,
+            "company": claims.get("company") or "", "license": master_link.summary()}

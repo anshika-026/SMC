@@ -47,8 +47,8 @@ function handleAuthFailure() {
   localStorage.removeItem("deco_user");
   const path = window.location.pathname;
   if (!path.startsWith("/login") && !path.startsWith("/client-login") && !path.startsWith("/client/") && !path.startsWith("/sso")) {
-    // A client who came from the Master Portal signs in there again.
-    window.location.href = saved?.sso && saved?.loginUrl ? saved.loginUrl : saved?.role === "client" ? "/client-login" : "/login";
+    // Connected to the Master Portal: sign in again from there.
+    window.location.href = (saved?.sso || saved?.viaPortal) && saved?.loginUrl ? saved.loginUrl : saved?.role === "client" ? "/client-login" : "/login";
   }
 }
 
@@ -79,12 +79,13 @@ async function request(path, options = {}) {
 // ---- Auth ------------------------------------------------------------
 // Admin login: email + password, verified server-side (backend/app/auth.py).
 // Throws with the backend's message ("Invalid email or password", or the
-// rate-limit message after too many failures).
-export async function login(email, password) {
+// rate-limit message after too many failures). When SMC is connected to the
+// Deco Vision portal, `portalTicket` (from ssoExchange) is required as well.
+export async function login(email, password, portalTicket = null) {
   const res = await fetch(`${BASE_URL}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, portal_ticket: portalTicket }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
@@ -96,9 +97,10 @@ export async function login(email, password) {
   const data = await res.json();
   return { token: data.token, user: { role: "admin", name: data.name, email: data.email } };
 }
-// Sign-in from the Deco Vision Master Portal (backend/app/sso_routes.py): the
-// one-minute launch token from the /sso#token=... link, exchanged once for an
-// SMC session.
+// Arrival from the Deco Vision Master Portal (backend/app/sso_routes.py): the
+// one-minute pass from the /sso#token=... link, exchanged once for a login
+// ticket ({ ticket, expires_in }). It is not a session: the login form then
+// needs the ticket and the SMC email and password.
 export async function ssoExchange(token) {
   const res = await fetch(`${BASE_URL}/auth/sso`, {
     method: "POST",

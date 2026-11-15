@@ -690,6 +690,8 @@ def update_settings(payload: SettingsIn, principal: dict = Depends(auth.require_
 class LoginIn(BaseModel):
     email: str = Field(min_length=1, max_length=254)
     password: str = Field(min_length=1, max_length=1024)
+    # Portal mode: the ticket POST /api/auth/sso gave for a Deco Vision pass.
+    portal_ticket: str | None = Field(default=None, max_length=128)
 
 
 @app.post("/api/auth/login")
@@ -701,11 +703,24 @@ def login(payload: LoginIn, request: Request):
     ip = ratelimit.client_ip(request)
     guard = ratelimit.admin_login_guard
     guard.check(ip, payload.email)
+    if master_link.enabled():
+        # Portal mode: the license must allow access, and the form must come
+        # from a Deco Vision pass (its ticket); the pass alone logs no one in.
+        problem = master_link.license_problem()
+        if problem:
+            raise HTTPException(status_code=403, detail=problem)
+        if not master_link.login_ticket_valid(payload.portal_ticket):
+            guard.failed(ip, payload.email)
+            raise HTTPException(status_code=401, detail="Open SMC from the Deco Vision portal to sign in.")
     admin = auth.authenticate_admin(payload.email, payload.password)
     if admin is None:
         guard.failed(ip, payload.email)
+        if master_link.enabled():
+            master_link.login_ticket_failed(payload.portal_ticket)
         raise HTTPException(status_code=401, detail="Invalid email or password")
     guard.succeeded(ip, payload.email)
+    if master_link.enabled():
+        master_link.use_login_ticket(payload.portal_ticket)
     token = auth.create_admin_session(admin)
     audit.record("admin.login", {"email": admin["email"]}, ip=ip)
     return {"email": admin["email"], "name": admin["name"], "token": token}
@@ -715,9 +730,6 @@ def login(payload: LoginIn, request: Request):
 def me(principal: dict = Depends(auth.require_admin)):
     # `license` is the Master Portal license summary (mode "standalone" when
     # SMC isn't connected); the frontend gates pages on its features.
-    if principal.get("sso_license_id"):
-        return {"email": "", "name": principal.get("sso_name") or principal.get("sso_username"),
-                "username": principal.get("sso_username"), "sso": True, "license": master_link.summary()}
     admin = auth.get_admin_user(principal["admin_user_id"])
     if admin is None:
         raise HTTPException(status_code=401, detail="Not authenticated")

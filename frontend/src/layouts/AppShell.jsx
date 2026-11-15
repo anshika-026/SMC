@@ -1,6 +1,7 @@
 import { Outlet, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
+import LicenseGraceBanner from "../components/LicenseGraceBanner";
 import GlobalBackground from "../components/GlobalBackground";
 
 const TITLES = {
@@ -31,6 +32,7 @@ export default function AppShell() {
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
         <Topbar title={title} />
+        <LicenseGraceBanner />
         <main className="flex-1 p-6 max-w-[1400px] w-full mx-auto">
           <Outlet />
         </main>
