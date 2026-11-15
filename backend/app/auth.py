@@ -325,6 +325,13 @@ def get_principal(authorization: str | None = Header(None)) -> dict:
     session = get_session(token)
     if session is None:
         raise HTTPException(status_code=401, detail="Not authenticated", headers={"WWW-Authenticate": "Bearer"})
+    if session["principal_type"] == ADMIN:
+        # Portal mode: a suspended, expired or unverifiable license shuts out
+        # every admin, local accounts included (emergency access: the
+        # command-line tools on the server). Standalone mode: no-op.
+        problem = master_link.license_problem()
+        if problem:
+            raise HTTPException(status_code=401, detail=problem, headers={"WWW-Authenticate": "Bearer"})
     return session
 
 

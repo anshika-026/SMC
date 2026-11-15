@@ -22,7 +22,7 @@ import time
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from . import auth, config, db, models, resilience
+from . import auth, config, db, master_link, models, resilience
 
 router = APIRouter(tags=["health"])
 
@@ -71,6 +71,9 @@ def readiness(detailed: bool = False) -> tuple[bool, dict]:
         "status": "ready" if ready else "not_ready",
         "uptime_seconds": round(time.time() - _started_at),
         "checks": checks,
+        # Portal mode: ok | grace (portal unreachable, still within the grace
+        # period) | locked; standalone otherwise. Alert on anything but ok.
+        "license": {k: v for k, v in master_link.state().items() if k in ("state", "checked_at", "grace_until")},
         "cameras": [
             {"camera_id": c["camera_id"], "state": c["state"],
              "seconds_since_frame": round(time.time() - c["last_frame_at"], 1) if c.get("last_frame_at") else None,
