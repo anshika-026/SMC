@@ -730,9 +730,6 @@ def login(payload: LoginIn, request: Request):
 def me(principal: dict = Depends(auth.require_admin)):
     # `license` is the Master Portal license summary (mode "standalone" when
     # SMC isn't connected); the frontend gates pages on its features.
-    if principal.get("sso_license_id"):
-        return {"email": "", "name": principal.get("sso_name") or principal.get("sso_username"),
-                "username": principal.get("sso_username"), "sso": True, "license": master_link.summary()}
     admin = auth.get_admin_user(principal["admin_user_id"])
     if admin is None:
         raise HTTPException(status_code=401, detail="Not authenticated")

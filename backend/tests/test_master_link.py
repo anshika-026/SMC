@@ -467,3 +467,179 @@ def test_no_limit_in_standalone_mode(api, admin_token):
     h = bearer(admin_token)
     for i in range(3):
         assert api.post("/api/cameras", json={**CAMERA, "name": f"Cam {i}"}, headers=h).status_code == 200
+
+
+# --- review fix 1: websockets follow the license lock ------------------------------------
+
+@pytest.fixture
+def staff_feed(portal):
+    from app.staff import occupancy
+    from app.staff.service import service as staff_service
+
+    cam = camera_db.add_camera("Gate", "HQ", host="10.0.0.9", purpose="Entry/Exit")
+    mgr = occupancy.StaffOccupancyManager()
+    staff_service.manager = mgr
+    now = time.time()
+    mgr._event(now, "ENTRY", camera_id=cam, employee_id="EMP-1")
+    mgr._present["v-1"] = {"visit_id": "v-1", "employee_id": "EMP-1", "entry_time": now,
+                           "last_seen": now, "camera_id": cam, "confidence": 0.9}
+    yield cam
+    staff_service.manager = None
+
+
+def _ws_close_code(api, url, receive="json"):
+    from starlette.websockets import WebSocketDisconnect
+
+    with api.websocket_connect(url) as ws:
+        with pytest.raises(WebSocketDisconnect) as e:
+            ws.receive_json() if receive == "json" else ws.receive_bytes()
+    return e.value.code
+
+
+def _lock(portal, monkeypatch, status):
+    if status == "unverifiable":
+        monkeypatch.setattr(master_link, "_fetched_at", time.time() - (config.ENTITLEMENT_GRACE_HOURS * 3600 + 5))
+    elif status == "expired":
+        portal.ent.update(status="active", expires_at=time.time() - 1)
+        master_link.refresh()
+    else:
+        portal.ent["status"] = status
+        master_link.refresh()
+
+
+@pytest.mark.parametrize("status", ["suspended", "expired", "unverifiable"])
+def test_all_websockets_refuse_an_admin_while_the_license_is_locked(api, portal, staff_feed, status, monkeypatch):
+    from app import main
+
+    token = portal_login(api, portal)
+    _lock(portal, monkeypatch, status)
+    assert not main._authorize_camera_ws(token, staff_feed)
+    assert _ws_close_code(api, f"/ws/live/{staff_feed}?token={token}", "bytes") == 4401
+    assert _ws_close_code(api, f"/ws/detections/{staff_feed}?token={token}") == 4401
+    assert _ws_close_code(api, f"/ws/staff?token={token}") == 4401
+    assert _ws_close_code(api, f"/ws/staff/debug/{staff_feed}?token={token}") == 4403
+
+
+def test_websockets_work_again_after_reactivation(api, portal, staff_feed):
+    from app import main
+
+    token = portal_login(api, portal)
+    portal.ent["status"] = "suspended"
+    master_link.refresh()
+    assert _ws_close_code(api, f"/ws/staff?token={token}") == 4401
+    portal.ent["status"] = "active"
+    master_link.refresh()
+    assert main._authorize_camera_ws(token, staff_feed)                            # /ws/live and /ws/detections
+    assert _ws_close_code(api, f"/ws/live/99999?token={token}", "bytes") != 4401   # past auth: no such camera
+    with api.websocket_connect(f"/ws/staff?token={token}") as ws:
+        assert ws.receive_json()["total_persons"] == 1
+
+
+def test_an_open_staff_websocket_is_closed_when_the_license_is_suspended(api, portal, staff_feed):
+    from starlette.websockets import WebSocketDisconnect
+
+    token = portal_login(api, portal)
+    with api.websocket_connect(f"/ws/staff?token={token}") as ws:
+        assert ws.receive_json()["total_persons"] == 1
+        portal.ent["status"] = "suspended"
+        master_link.refresh()
+        with pytest.raises(WebSocketDisconnect) as e:
+            ws.receive_json()                              # its next re-check (every 2 s) closes it
+    assert e.value.code == 4401
+
+
+def test_websockets_are_unchanged_in_standalone_mode(api, tables, admin_token):
+    from app import main
+
+    cam = camera_db.add_camera("Gate", "HQ", host="10.0.0.9")
+    assert main._authorize_camera_ws(admin_token, cam)
+
+
+# --- review fix 2: the old pass-only session is gone -------------------------------------
+
+def _legacy_pass_only_session():
+    """A session row as the previous version of POST /api/auth/sso created it."""
+    token = "legacy-" + str(time.time_ns())
+    with auth.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token, principal_type, email, created_at, expires_at, "
+            " sso_license_id, sso_username, sso_name, sso_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (token, auth.ADMIN, "smc_client", time.time(), time.time() + 3600, LICENSE_ID, "smc_client", "SMC",
+             "client_admin"))
+    return token
+
+
+def test_a_legacy_pass_only_session_grants_nothing(api, portal):
+    token = _legacy_pass_only_session()
+    assert api.get("/api/auth/me", headers=bearer(token)).status_code == 401
+    assert api.get("/api/cameras", headers=bearer(token)).status_code == 401
+    with auth.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sessions WHERE token = ?", (token,)).fetchone()[0] == 0
+    assert not hasattr(auth, "create_sso_session")
+
+
+def test_startup_removes_pass_only_sessions_and_keeps_normal_ones(api, portal):
+    normal = portal_login(api, portal)
+    legacy = _legacy_pass_only_session()
+    auth.init_db()                                        # what startup does
+    with auth.get_connection() as conn:
+        tokens = {r[0] for r in conn.execute("SELECT token FROM sessions")}
+    assert legacy not in tokens and normal in tokens
+    assert api.get("/api/auth/me", headers=bearer(normal)).json()["email"] == ADMIN_EMAIL
+
+
+def test_an_old_pass_alone_still_cannot_log_in(api, portal):
+    r = sign_in(api, launch_token(portal, role="client_admin"))
+    assert "token" not in r.json() and "session_token" not in r.json()
+    assert api.get("/api/auth/me", headers=bearer(r.json()["ticket"])).status_code == 401
+
+
+# --- review fix 3: SMC's own client accounts follow the license too ----------------------
+
+@pytest.fixture
+def smc_client(portal):
+    from app import license_db
+
+    company = license_db.create_company("Branch office")
+    lic = license_db.create_license(company["id"], 2, "branch", username="branch_user", password="branch-pass-123456")
+    license_db.set_license_features(lic["id"], ["attendance"])
+    return lic
+
+
+def _client_login(api):
+    return api.post("/api/licenses/client-login", json={"username": "branch_user", "password": "branch-pass-123456"})
+
+
+def test_client_account_works_while_the_license_is_active(api, portal, smc_client):
+    r = _client_login(api)
+    assert r.status_code == 200, r.text
+    assert api.get("/api/cameras", headers=bearer(r.json()["session_token"])).status_code == 200
+
+
+@pytest.mark.parametrize("status", ["suspended", "expired", "unverifiable"])
+def test_client_login_and_open_client_sessions_are_locked(api, portal, smc_client, status, monkeypatch):
+    session = _client_login(api).json()["session_token"]
+    _lock(portal, monkeypatch, status)
+    r = _client_login(api)
+    assert r.status_code == 403 and "license" in r.json()["detail"]
+    r = api.get("/api/cameras", headers=bearer(session))
+    assert r.status_code == 401 and "license" in r.json()["detail"]
+
+
+def test_client_account_works_again_after_reactivation(api, portal, smc_client):
+    session = _client_login(api).json()["session_token"]
+    portal.ent["status"] = "suspended"
+    master_link.refresh()
+    assert api.get("/api/cameras", headers=bearer(session)).status_code == 401
+    portal.ent["status"] = "active"
+    master_link.refresh()
+    assert api.get("/api/cameras", headers=bearer(session)).status_code == 200
+    assert _client_login(api).status_code == 200
+
+
+def test_client_accounts_are_unchanged_in_standalone_mode(api, tables):
+    from app import license_db
+
+    company = license_db.create_company("Standalone client")
+    license_db.create_license(company["id"], 2, "s", username="branch_user", password="branch-pass-123456")
+    assert _client_login(api).status_code == 200

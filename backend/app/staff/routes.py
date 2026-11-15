@@ -132,7 +132,7 @@ def _ws_scope(token: str | None) -> tuple[bool, set[int] | None]:
     """(allowed, camera scope) for a websocket token, re-evaluated on every
     push so a suspended license or revoked session stops the stream."""
     session = auth.get_session(token)
-    if session is None:
+    if session is None or auth.license_lock_reason():
         return False, None
     try:
         _staff_viewer(session)
@@ -161,12 +161,12 @@ def register_websockets(app) -> None:
         # Admin-only diagnostic (raw tracks, line geometry, per-frame state).
         await websocket.accept()
         session = auth.get_session(token)
-        if session is None or session["principal_type"] != auth.ADMIN:
+        if session is None or session["principal_type"] != auth.ADMIN or auth.license_lock_reason():
             await websocket.close(code=4403)
             return
         try:
             while True:
-                if auth.get_session(token) is None:
+                if auth.get_session(token) is None or auth.license_lock_reason():
                     await websocket.close(code=4401)
                     return
                 await websocket.send_json(service.debug(camera_id))
