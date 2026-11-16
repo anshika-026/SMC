@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 import * as mock from "../data/mockData";
 import { featureOn } from "../lib/features";
+import { TOKEN_KEY, USER_KEY, APP_BASE, appPath } from "../lib/appBase";
 
 // Base URL of the backend API. In production this is normally the relative
 // "/api" (nginx serves the SPA and proxies /api and /ws to the backend on the
@@ -25,6 +26,8 @@ export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 // ("/api") resolves against the page's own host, and https pages get wss.
 const API_URL = new URL(BASE_URL || "/api", window.location.origin);
 export const WS_HOST = API_URL.host;
+// WebSockets live next to the API: "/smc/api" -> "/smc/ws/...", "/api" -> "/ws/...".
+export const WS_PREFIX = API_URL.pathname.replace(/\/api\/?$/, "");
 export const WS_PROTOCOL = API_URL.protocol === "https:" ? "wss" : "ws";
 
 // Called when a request comes back 401 while this browser THOUGHT it had a
@@ -35,25 +38,25 @@ export const WS_PROTOCOL = API_URL.protocol === "https:" ? "wss" : "ws";
 // Does nothing for a failed LOGIN attempt (no token set yet), so it never
 // interferes with the error message a login form needs to show.
 function handleAuthFailure() {
-  const hadToken = !!localStorage.getItem("deco_token");
+  const hadToken = !!localStorage.getItem(TOKEN_KEY);
   if (!hadToken) return;
   let saved = null;
   try {
-    saved = JSON.parse(localStorage.getItem("deco_user") || "null");
+    saved = JSON.parse(localStorage.getItem(USER_KEY) || "null");
   } catch {
     // corrupt localStorage — fall through to the plain login page
   }
-  localStorage.removeItem("deco_token");
-  localStorage.removeItem("deco_user");
-  const path = window.location.pathname;
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  const path = window.location.pathname.slice(APP_BASE.length);   // the route inside this app
   if (!path.startsWith("/login") && !path.startsWith("/client-login") && !path.startsWith("/client/") && !path.startsWith("/sso")) {
     // Connected to the Master Portal: sign in again from there.
-    window.location.href = (saved?.sso || saved?.viaPortal) && saved?.loginUrl ? saved.loginUrl : saved?.role === "client" ? "/client-login" : "/login";
+    window.location.href = (saved?.sso || saved?.viaPortal) && saved?.loginUrl ? saved.loginUrl : appPath(saved?.role === "client" ? "/client-login" : "/login");
   }
 }
 
 function authHeaders() {
-  const token = localStorage.getItem("deco_token");
+  const token = localStorage.getItem(TOKEN_KEY);
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -814,13 +817,13 @@ export async function resetStaffOccupancy() {
   return request("/staff/reset", { method: "POST", body: JSON.stringify({ reason: "manual reset" }) });
 }
 export function staffSocketUrl(path) {
-  const token = localStorage.getItem("deco_token") || "";
-  return `${WS_PROTOCOL}://${WS_HOST}${path}?token=${encodeURIComponent(token)}`;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  return `${WS_PROTOCOL}://${WS_HOST}${WS_PREFIX}${path}?token=${encodeURIComponent(token)}`;
 }
 
 // ---- Settings ------------------------------------------------------------
 // No backend endpoint exists for user profiles yet, so this persists to the
-// same "deco_user" localStorage key AuthContext already writes on login —
+// same USER_KEY localStorage key AuthContext already writes on login —
 // otherwise an edit here would appear to save (toast + updated UI) but
 // silently revert on the next page load/navigation, since getProfile() would
 // keep returning the pristine mock object. AuthContext.updateUser() keeps
@@ -832,7 +835,7 @@ const EMPTY_PROFILE = { name: "", email: "", phone: "", role: "" };
 export async function getProfile() {
   const base = DEMO_MODE ? mock.currentUser : EMPTY_PROFILE;
   try {
-    const saved = localStorage.getItem("deco_user");
+    const saved = localStorage.getItem(USER_KEY);
     if (saved) return { ...base, ...JSON.parse(saved) };
   } catch {
     // corrupt/unavailable localStorage — fall through to the default profile
@@ -841,9 +844,9 @@ export async function getProfile() {
 }
 export async function updateProfile(payload) {
   try {
-    const saved = localStorage.getItem("deco_user");
+    const saved = localStorage.getItem(USER_KEY);
     const merged = { ...(saved ? JSON.parse(saved) : EMPTY_PROFILE), ...payload };
-    localStorage.setItem("deco_user", JSON.stringify(merged));
+    localStorage.setItem(USER_KEY, JSON.stringify(merged));
   } catch {
     // localStorage unavailable (e.g. private browsing) — edit still applies
     // for the rest of this session via React state, just won't survive a reload

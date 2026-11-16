@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Armchair, ChevronRight, DoorOpen, MapPinned, Plus, ShieldAlert, Trash2, Users } from "lucide-react";
 import Modal from "../Modal";
+import { appPath } from "../../lib/appBase";
 import SidePanel from "../SidePanel";
 import VisitorZoneEditor from "../VisitorZoneEditor";
 import { liveCameraFor } from "../VisitorCameraGrid";
@@ -264,7 +265,7 @@ function IntrusionActivity({ zone }) {
         </table>
       )}
       {playing && <AlertClip key={playing.id} alertId={playing.id} clipStatus={playing.clip_status} label={`${playing.event} ${playing.zone_name}`} />}
-      <a href="/intrusion" className="text-xs text-brand-600">All intrusion alerts and analytics on the Intrusion page</a>
+      <a href={appPath("/intrusion")} className="text-xs text-brand-600">All intrusion alerts and analytics on the Intrusion page</a>
     </div>
   );
 }

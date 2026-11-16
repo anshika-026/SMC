@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useCallback, useEffect, useRef } f
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
 import { setLicensedFeatures } from "../lib/features";
+import { TOKEN_KEY, USER_KEY } from "../lib/appBase";
 
 const AuthContext = createContext(null);
 
@@ -27,7 +28,7 @@ const CLIENT_SESSION_REFRESH_MS = 60000;
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem("deco_user");
+    const saved = localStorage.getItem(USER_KEY);
     const parsed = saved ? JSON.parse(saved) : null;
     applyLicense(parsed?.license);   // before the first render, so a refresh never flashes hidden pages
     return parsed;
@@ -37,8 +38,8 @@ export function AuthProvider({ children }) {
 
   const login = useCallback(async (email, password, portalTicket = null) => {
     const res = await api.login(email, password, portalTicket);
-    localStorage.setItem("deco_token", res.token);
-    localStorage.setItem("deco_user", JSON.stringify(res.user));
+    localStorage.setItem(TOKEN_KEY, res.token);
+    localStorage.setItem(USER_KEY, JSON.stringify(res.user));
     setUser(res.user);
     return res.user;
   }, []);
@@ -61,7 +62,7 @@ export function AuthProvider({ children }) {
 
   // Client-portal login (license username/password, see api.clientLogin) —
   // a separate credential type from the admin login above, but stored the
-  // same way (localStorage "deco_user" + this same `user` state) so the
+  // same way (localStorage USER_KEY + this same `user` state) so the
   // rest of the app (ProtectedRoute, Topbar, Sidebar) doesn't need two
   // parallel session concepts. `role: "client"` plus the license's
   // assigned cameras/features is what Sidebar/LiveFeed/Topbar use to scope
@@ -69,8 +70,8 @@ export function AuthProvider({ children }) {
   const loginAsClient = useCallback(async (username, password) => {
     const res = await api.clientLogin(username, password);
     const clientUser = clientUserFrom(res);
-    localStorage.setItem("deco_token", res.session_token);
-    localStorage.setItem("deco_user", JSON.stringify(clientUser));
+    localStorage.setItem(TOKEN_KEY, res.session_token);
+    localStorage.setItem(USER_KEY, JSON.stringify(clientUser));
     setUser(clientUser);
     return clientUser;
   }, []);
@@ -81,8 +82,8 @@ export function AuthProvider({ children }) {
     // logged, or the tab is shared) rather than just forgetting it here.
     const current = userRef.current;
     const done = current?.role === "client" ? api.clientLogout() : current ? api.logoutAdmin() : Promise.resolve();
-    localStorage.removeItem("deco_token");
-    localStorage.removeItem("deco_user");
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
     applyLicense(null);
     setUser(null);
     // A client who came from the Master Portal goes back to its sign-in page
@@ -96,7 +97,7 @@ export function AuthProvider({ children }) {
   const updateUser = useCallback((patch) => {
     setUser((prev) => {
       const next = { ...prev, ...patch };
-      localStorage.setItem("deco_user", JSON.stringify(next));
+      localStorage.setItem(USER_KEY, JSON.stringify(next));
       return next;
     });
   }, []);
