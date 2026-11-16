@@ -1,0 +1,28 @@
+# systemd USER unit for SMC's RTMP ingest (MediaMTX), for cameras that push their
+# stream to SMC. Same role as the mediamtx container in docker-compose.yml.
+# Only RTMP (1935) faces the network; its RTSP and API listen on 127.0.0.1, and
+# every publish/read is decided by the SMC backend (/api/ingest/auth).
+#
+#   ~/smc/mediamtx/mediamtx       the MediaMTX binary (v1.9.3, linux amd64; see README)
+#   ~/smc/mediamtx.yml            deploy/gpu/mediamtx-smc.yml
+#   ~/smc/mediamtx.env            MTX_AUTHHTTPADDRESS=http://127.0.0.1:18821/api/ingest/auth?secret=<INGEST_HOOK_SECRET>
+#                                 (chmod 600; the secret is the one in backend.env)
+#
+# Install (as kanishka):
+#   cp deploy/gpu/smc-mediamtx.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user enable --now smc-mediamtx
+[Unit]
+Description=SMC RTMP ingest (MediaMTX)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/smc/mediamtx.env
+ExecStart=%h/smc/mediamtx/mediamtx %h/smc/mediamtx.yml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

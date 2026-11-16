@@ -1,0 +1,55 @@
+# MediaMTX for SMC on the shared DeWIN GPU server (deploy/gpu/smc-mediamtx.service).
+# Same as mediamtx/mediamtx.yml (the Docker setup) except the addresses: the
+# internal RTSP and API listen on 127.0.0.1 on ports nothing else on the server
+# uses, and the hook address comes from ~/smc/mediamtx.env. Only RTMP 1935 is
+# reachable from outside, and the firewall should allow it from the office only.
+#
+# Ingest server for RTMP-push cameras (MediaMTX). Cameras publish to
+#   rtmp://<RTMP_PUBLIC_HOST>:<port>/live/<stream key>
+# and every publish and read is decided by the SMC backend
+# (POST /api/ingest/auth, see backend/app/ingest.py). The backend then reads each
+# stream over the internal RTSP port with the same reader as every other camera.
+
+# info would log stream paths, and a path contains the camera's stream key.
+logLevel: warn
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+
+# Every action (publish, read, api) is asked of the backend; nothing is excluded.
+# The hook address (with its shared secret) comes from the MTX_AUTHHTTPADDRESS
+# environment variable (~/smc/mediamtx.env), so no secret lives in this file.
+authMethod: http
+authHTTPExclude: []
+
+# Internal only (127.0.0.1): stream status and kicking the
+# old publisher after a key rotation.
+api: yes
+apiAddress: 127.0.0.1:19997
+metrics: no
+pprof: no
+playback: no
+
+# Internal only: where the backend reads streams from.
+rtsp: yes
+rtspAddress: 127.0.0.1:18554
+
+# The only public port.
+rtmp: yes
+rtmpAddress: :1935
+# RTMPS: set rtmpEncryption to "optional" or "strict", put a certificate and key in
+# this folder, point rtmpServerCert/rtmpServerKey at them, publish rtmpsAddress
+# (:1936) in docker-compose.yml, and set RTMP_PUBLIC_SCHEME=rtmps for the backend.
+rtmpEncryption: "no"
+
+hls: no
+webrtc: no
+srt: no
+
+pathDefaults:
+  # A second publisher on a stream that is already live is refused instead of
+  # silently taking it over.
+  overridePublisher: no
+
+paths:
+  all_others:
