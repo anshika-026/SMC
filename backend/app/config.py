@@ -105,6 +105,10 @@ ENABLED_FEATURES = frozenset(f.strip() for f in _str("ENABLED_FEATURES", "").spl
 # InsightFace looks for <root>/models/buffalo_l. Defaults to its own default
 # location so an existing developer install keeps working.
 INSIGHTFACE_ROOT = _path("INSIGHTFACE_ROOT", Path.home() / ".insightface")
+# Where face detection/recognition (InsightFace, onnxruntime) runs: "auto" uses
+# the GPU when onnxruntime-gpu can (the GPU server), else the CPU (plain
+# onnxruntime, e.g. the laptop); "cpu" always uses the CPU.
+FACE_ONNX_DEVICE = _str("FACE_ONNX_DEVICE", "auto").lower()
 
 # --- Live video ---------------------------------------------------------------
 # How often the live-view websocket pushes a JPEG frame, independent of the
