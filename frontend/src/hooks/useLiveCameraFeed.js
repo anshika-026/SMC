@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { WS_HOST, WS_PROTOCOL } from "../api/client";
+import { WS_HOST, WS_PREFIX, WS_PROTOCOL } from "../api/client";
+import { TOKEN_KEY } from "../lib/appBase";
 
 // Person-first overlay: every tracked person the backend sends gets a box
 // (their full body, from face_pipeline.py's person tracks) labelled "Person".
@@ -117,9 +118,9 @@ export default function useLiveCameraFeed(camera, { overlay = true, width, faceV
     // the backend (main.py's _authorize_camera_ws) looks it up the same
     // way it would a header, and closes the connection if it's missing,
     // expired, or doesn't own this camera.
-    const token = localStorage.getItem("deco_token") || "";
-    const liveUrl = `${WS_PROTOCOL}://${WS_HOST}/ws/live/${camera.id}?token=${encodeURIComponent(token)}${overlay ? "" : "&plain=1"}${width ? `&w=${width}` : ""}`;
-    const detUrl = `${WS_PROTOCOL}://${WS_HOST}/ws/detections/${camera.id}?token=${encodeURIComponent(token)}`;
+    const token = localStorage.getItem(TOKEN_KEY) || "";
+    const liveUrl = `${WS_PROTOCOL}://${WS_HOST}${WS_PREFIX}/ws/live/${camera.id}?token=${encodeURIComponent(token)}${overlay ? "" : "&plain=1"}${width ? `&w=${width}` : ""}`;
+    const detUrl = `${WS_PROTOCOL}://${WS_HOST}${WS_PREFIX}/ws/detections/${camera.id}?token=${encodeURIComponent(token)}`;
 
     // A dropped socket (backend restart, network blip, camera reconnect)
     // reconnects on its own with backoff (1 s doubling to 30 s) instead of

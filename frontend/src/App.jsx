@@ -1,4 +1,5 @@
 import { lazy, Suspense } from "react";
+import { APP_BASE } from "./lib/appBase";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -62,7 +63,7 @@ function Feature({ name, license, children }) {
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={APP_BASE || undefined}>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/client-login" element={<ClientLogin />} />

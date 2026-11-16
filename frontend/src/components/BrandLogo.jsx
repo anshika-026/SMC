@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { appPath } from "../lib/appBase";
 
 // The Dewin logo, served from frontend/public/dewin-logo.png. Falls back to
 // the plain "D" mark if that file is missing, so the header never shows a
@@ -17,7 +18,7 @@ export default function BrandLogo({ size = 28 }) {
   }
   return (
     <img
-      src="/dewin-logo.png"
+      src={appPath("/dewin-logo.png")}
       alt="Dewin"
       className="object-contain shrink-0 rounded-md"
       style={{ height: size, width: "auto" }}
