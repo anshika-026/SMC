@@ -1,0 +1,35 @@
+# systemd USER unit for the SMC backend on the shared DeWIN GPU server, next to
+# Deco Vision (tatv@prod / tatv@stage) and run the same way: no root, bound to
+# 127.0.0.1, nginx in front (deploy/gpu/nginx-smc.conf).
+#
+#   ~/smc/current/backend   the live release (switched by scripts/deploy_smc_gpu.sh)
+#   ~/smc/backend.env       config + secrets (chmod 600, never in git; see backend.env.template)
+#   ~/smc/venv              CUDA torch + onnxruntime-gpu
+#
+# Install (as kanishka):
+#   cp deploy/gpu/smc.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   (the first successful deploy enables it)
+[Unit]
+Description=SMC backend
+After=network-online.target smc-mediamtx.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/smc/current/backend
+EnvironmentFile=%h/smc/backend.env
+ExecStart=%h/smc/venv/bin/python -m app.serve
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
+LimitNOFILE=65536
+NoNewPrivileges=true
+# The server is shared: SMC may never take more than this from Deco Vision and
+# the other applications. Takes effect when the user manager has the cpu and
+# memory controllers delegated (Ubuntu's default for user@.service).
+MemoryMax=12G
+CPUQuota=600%
+
+[Install]
+WantedBy=default.target
