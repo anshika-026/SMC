@@ -1,6 +1,6 @@
 # systemd USER unit for the SMC backend on the shared DeWIN GPU server, next to
 # Deco Vision (tatv@prod / tatv@stage) and run the same way: no root, bound to
-# 127.0.0.1, nginx in front (deploy/gpu/nginx-smc.conf).
+# 127.0.0.1, nginx in front (deploy/gpu/nginx-smc-location.conf).
 #
 #   ~/smc/current/backend   the live release (switched by scripts/deploy_smc_gpu.sh)
 #   ~/smc/backend.env       config + secrets (chmod 600, never in git; see backend.env.template)
