@@ -1,0 +1,4 @@
+# Files that run on the Linux GPU server keep Unix line endings, whatever the
+# Windows checkout uses (git archive would otherwise convert them to CRLF).
+*.sh text eol=lf
+deploy/gpu/** text eol=lf
