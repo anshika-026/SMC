@@ -67,6 +67,19 @@ from app import expression
 
 log = logging.getLogger("face_pipeline")
 
+
+def onnx_providers(device: str = "auto") -> tuple[list[str], int]:
+    """(onnxruntime providers, InsightFace ctx_id) for face detection and
+    recognition: the GPU (CUDA first, CPU as fallback; ctx_id 0 is the first card
+    CUDA_VISIBLE_DEVICES leaves visible) when device is "auto" and onnxruntime-gpu
+    offers CUDA, else the CPU only (ctx_id -1), as with plain onnxruntime."""
+    if device != "cpu":
+        import onnxruntime
+
+        if "CUDAExecutionProvider" in onnxruntime.get_available_providers():
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"], 0
+    return ["CPUExecutionProvider"], -1
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -638,10 +651,9 @@ class CameraFacePipeline:
         since the human already framed the face."""
         with cls._model_lock:
             if cls._arcface is None:
-                # This box has no CUDA (torch reports cuda.is_available() ==
-                # False, and only plain `onnxruntime` is installed, not
-                # `onnxruntime-gpu`) — CPUExecutionProvider only. Swap back
-                # to the CUDA+CPU list if this ever runs on a GPU box.
+                # GPU when onnxruntime-gpu can use it (the GPU server), else
+                # the CPU, as on a box with plain `onnxruntime` (see
+                # onnx_providers and config.FACE_ONNX_DEVICE).
                 # Only detection (5-point landmarks for alignment) and
                 # recognition (the embedding) — buffalo_l otherwise also
                 # runs genderage + two dense-landmark models on every face,
@@ -652,11 +664,13 @@ class CameraFacePipeline:
                 from app import config as _config, models as _models
 
                 _models.require("insightface_buffalo_l")
+                providers, ctx_id = onnx_providers(_config.FACE_ONNX_DEVICE)
+                log.info("face recognition runs on %s", "the GPU" if ctx_id >= 0 else "the CPU")
                 cls._arcface = insightface.app.FaceAnalysis(
-                    name="buffalo_l", root=str(_config.INSIGHTFACE_ROOT), providers=["CPUExecutionProvider"],
+                    name="buffalo_l", root=str(_config.INSIGHTFACE_ROOT), providers=providers,
                     allowed_modules=["detection", "recognition"],
                 )
-                cls._arcface.prepare(ctx_id=-1, det_size=(640, 640))
+                cls._arcface.prepare(ctx_id=ctx_id, det_size=(640, 640))
 
     @classmethod
     def _ensure_yolo_loaded(cls):
