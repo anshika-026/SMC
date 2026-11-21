@@ -29,9 +29,9 @@ DB_PATH = config.DB_PATH
 # held-out data, reads at >= 0.8 were wrong ~0.3% of the time.
 ATTENDANCE_MIN_CONFIDENCE = float(os.environ.get("ATTENDANCE_MIN_CONFIDENCE", "0.8"))
 # Arriving after this local time (HH:MM) is a late arrival.
-ATTENDANCE_LATE_AFTER = os.environ.get("ATTENDANCE_LATE_AFTER", "09:30")
+ATTENDANCE_LATE_AFTER = os.environ.get("ATTENDANCE_LATE_AFTER", "10:30")  # office opens 10:00, 30 min grace
 # Seen within this many minutes = "On site"; seen earlier today = "Present".
-ATTENDANCE_ON_SITE_MINUTES = float(os.environ.get("ATTENDANCE_ON_SITE_MINUTES", "15"))
+ATTENDANCE_ON_SITE_MINUTES = float(os.environ.get("ATTENDANCE_ON_SITE_MINUTES", "30"))  # someone seated, face turned away, is still there
 # The same employee is re-recognised several times a second while in view;
 # write at most one update per this many seconds (the first of the day is
 # always written immediately).
@@ -46,6 +46,15 @@ LATE_REPEAT_COUNT = int(os.environ.get("ATTENDANCE_LATE_REPEAT_COUNT", "3"))
 # A person seen again on the same camera within this gap is the same
 # recognition event (face_recognition_events).
 RECOGNITION_EVENT_GAP_SECONDS = float(os.environ.get("RECOGNITION_EVENT_GAP_SECONDS", "600"))
+# A day counts as present only once face recognition has seen the employee this many times
+# (attendance_days.sightings). One or two sightings in a day were almost always someone else's
+# face matched by mistake (e.g. a single frame on 18 Nov), while real days have 10+.
+MIN_SIGHTINGS = int(os.environ.get("ATTENDANCE_MIN_SIGHTINGS", "3"))
+
+
+def confirmed(row) -> bool:
+    """Whether an attendance_days row is enough to count the employee as present that day."""
+    return row is not None and (row["sightings"] or 0) >= MIN_SIGHTINGS
 
 _last_write: dict[str, float] = {}
 # "employee|camera" -> [event row id, last_seen, last time the row was written]
@@ -130,8 +139,6 @@ def record(employee_id: str, camera_id: int, confidence: float, ts: float | None
             return False
         _last_write[key] = ts
     with _conn() as conn:
-        first_today = conn.execute(
-            "SELECT 1 FROM attendance_days WHERE employee_id = ? AND day = ?", (employee_id, day)).fetchone() is None
         conn.execute(
             """
             INSERT INTO attendance_days (employee_id, day, first_seen, last_seen, first_camera, last_camera, sightings, best_confidence)
@@ -145,10 +152,13 @@ def record(employee_id: str, camera_id: int, confidence: float, ts: float | None
             """,
             (employee_id, day, ts, ts, camera_id, camera_id, confidence),
         )
-    if first_today and ts > _late_cutoff(day):
+        row = conn.execute("SELECT sightings, first_seen FROM attendance_days WHERE employee_id = ? AND day = ?",
+                           (employee_id, day)).fetchone()
+    # Late: once the day is confirmed (MIN_SIGHTINGS), judged by their first sighting.
+    if row["sightings"] == MIN_SIGHTINGS and row["first_seen"] > _late_cutoff(day):
         from app import alerts
 
-        alerts.late_arrival(employee_id, employee_directory.get_employee(employee_id)["name"], camera_id, ts)
+        alerts.late_arrival(employee_id, employee_directory.get_employee(employee_id)["name"], camera_id, row["first_seen"])
     return True
 
 
@@ -247,7 +257,8 @@ def day_report(day: str, now: float | None = None) -> dict:
     numbers for the Attendance page's stat cards."""
     now = now if now is not None else time.time()
     with _conn() as conn:
-        seen = {r["employee_id"]: dict(r) for r in conn.execute("SELECT * FROM attendance_days WHERE day = ?", (day,))}
+        seen = {r["employee_id"]: dict(r) for r in conn.execute("SELECT * FROM attendance_days WHERE day = ?", (day,))
+                if confirmed(r)}
         on_leave = {r[0] for r in conn.execute(
             "SELECT employee_id FROM attendance_leave WHERE day_from <= ? AND day_to >= ?", (day, day))}
     cameras = {c["id"]: c["name"] for c in camera_db.list_cameras()}
@@ -323,6 +334,7 @@ def history(employee_id: str, days: int = 14, now: float | None = None) -> list[
         for i in range(days):
             d = (today - datetime.timedelta(days=i)).isoformat()
             s = conn.execute("SELECT * FROM attendance_days WHERE employee_id = ? AND day = ?", (employee_id, d)).fetchone()
+            s = s if confirmed(s) else None
             leave = conn.execute(
                 "SELECT 1 FROM attendance_leave WHERE employee_id = ? AND day_from <= ? AND day_to >= ?", (employee_id, d, d)
             ).fetchone()

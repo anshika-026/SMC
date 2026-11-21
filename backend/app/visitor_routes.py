@@ -92,9 +92,11 @@ def visitor_kpis():
 
 @router.get("/visits")
 def list_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=2000),
-                start: str | None = None, end: str | None = None):
+                start: str | None = None, end: str | None = None, employee_sittings: bool = False):
     """Visitor history, one row per visit (repeat alerts grouped). start / end
-    (YYYY-MM-DD, both included) limit it to those days."""
+    (YYYY-MM-DD, both included) limit it to those days. Sittings that were an
+    employee's (visitors.mark_employee_sittings) are left out unless
+    employee_sittings=true: a visitor is someone who is not an employee."""
     try:
         since = datetime.datetime.combine(datetime.date.fromisoformat(start), datetime.time.min).timestamp() if start else None
         until = (datetime.datetime.combine(datetime.date.fromisoformat(end) + datetime.timedelta(days=1), datetime.time.min).timestamp()
@@ -103,6 +105,7 @@ def list_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=2
         raise HTTPException(status_code=422, detail="Dates must look like 2026-11-03")
     if since is not None and until is not None and since >= until:
         raise HTTPException(status_code=422, detail="The start date must be on or before the end date")
+    visitors.assign_visitor_numbers()
     rows = visitors.list_visits(camera_id, limit, since=since, until=until)
     faces = visitors.faces_during_visits(rows)
     names: dict[str, str] = {}
@@ -115,9 +118,21 @@ def list_visits(camera_id: int | None = None, limit: int = Query(100, ge=1, le=2
             out.append({"employee_id": emp, "name": names[emp], "faces": n})
         return out
 
+    visitors.mark_employee_sittings(rows, faces)
+    if not employee_sittings:
+        rows = [r for r in rows if r["kind"] == "visitor"]
     for r in rows:
         f = faces.get(r["visit"]) or {"employees": {}, "possible": {}, "unknown": 0}
         r["faces_seen"] = {"employees": named(f["employees"]), "possible": named(f["possible"]), "unknown": f["unknown"]}
+        r["employees_present"] = named({e: 0 for e in r["employees_present"]})
+    numbers = visitors.visitor_numbers([r["visit"] for r in rows])
+    for r in rows:
+        r["visitor_number"] = (numbers.get(r["visit"]) or {}).get("number")   # "Visitor #n"; None until numbered
+    # One visitor's rows of one stay are one visit; "came N times" counts separate visits.
+    rows = visitors.merge_same_visitor(rows)
+    counts = visitors.visit_counts({r["visitor_number"] for r in rows if r["visitor_number"]})
+    for r in rows:
+        r["visitor_visits"] = counts.get(r["visitor_number"], 0) if r["visitor_number"] else 0
     return {"visits": rows}
 
 

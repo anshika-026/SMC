@@ -11,9 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import analytics_settings, audit, auth, camera_db, camera_stream
+from app import analytics_settings, audit, auth, camera_db, camera_stream, footfall, site_footfall
 from app.footfall import service
-from app.reid import reid_db
 
 router = APIRouter(prefix="/api/footfall", tags=["footfall"])
 
@@ -39,7 +38,8 @@ def footfall_history(date_from: str = Query(..., alias="from"), date_to: str = Q
         raise HTTPException(status_code=422, detail="Dates must look like 2026-10-31")
     if b < a or (b - a).days > 366:
         raise HTTPException(status_code=422, detail="Pick a range of up to one year")
-    return {"days": reid_db.footfall_daily(a.isoformat(), b.isoformat())}
+    # Unique people seen each day (site_footfall): the gate line alone missed most people.
+    return {"days": site_footfall.daily(a.isoformat(), b.isoformat())}
 
 
 @router.get("/day")
@@ -51,7 +51,26 @@ def footfall_day(date: str, _: dict = Depends(auth.require_admin)):
         datetime.date.fromisoformat(date)
     except ValueError:
         raise HTTPException(status_code=422, detail="Dates must look like 2026-10-31")
-    return {"date": date, **service.day_stats(date)}
+    stats = site_footfall.day_stats(date)
+    gates = [c for c in camera_db.list_cameras() if footfall.is_gate(c)]
+    return {"date": date, **stats, "gates": len(gates), "gates_without_entry_line": 0}
+
+
+@router.get("/site-people")
+def footfall_site_people(date: str, _: dict = Depends(auth.require_admin)):
+    """The day's footfall, one row per person: employees recognised on any camera and
+    visitors (Visitor #n), with first and last sighting and the cameras that saw them."""
+    import datetime
+
+    try:
+        datetime.date.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Dates must look like 2026-10-31")
+    names = {c["id"]: c["name"] for c in camera_db.list_cameras()}
+    ppl = site_footfall.people(date)
+    for p in ppl:
+        p["camera_names"] = [names.get(c, f"Camera {c}") for c in p["cameras"]]
+    return {"date": date, "people": ppl}
 
 
 @router.get("/people")

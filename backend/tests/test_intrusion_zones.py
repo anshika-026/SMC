@@ -324,3 +324,60 @@ def test_changing_a_loitering_zone_to_a_longer_duration_restarts_its_timers(setu
 def test_format_duration_reads_naturally():
     assert [intrusion.format_duration(s) for s in (30, 60, 90, 900, 3600, 7200, 1)] == [
         "30 seconds", "1 minute", "1 min 30 s", "15 minutes", "1 hour", "2 hours", "1 second"]
+
+
+def test_each_intrusion_gets_its_own_alert():
+    """People keep being seen: one alert. The zone was empty for longer than
+    NEW_ALERT_AFTER_SECONDS: the next person is a new intrusion with its own alert."""
+    from app import intrusion
+
+    svc = intrusion.IntrusionService()
+    gap = intrusion.NEW_ALERT_AFTER_SECONDS
+    k1 = svc.episode_key(15, 1000.0)
+    assert svc.episode_key(15, 1000.0 + 30) == k1            # still the same intrusion
+    assert svc.episode_key(15, 1030.0 + gap - 1) == k1
+    k2 = svc.episode_key(15, 1030.0 + gap - 1 + gap + 5)     # empty for longer than the gap
+    assert k2 != k1 and k2.startswith("intrusion:15:")
+    assert svc.episode_key(16, 1000.0) != k1                 # another zone
+
+
+def test_the_alert_names_the_person_inside_the_zone_not_others_in_view(setup, monkeypatch):
+    """Face recognition is asked who is at each box INSIDE the zone; someone else the camera
+    recognises elsewhere in the picture (e.g. seated nearby) is never named."""
+    from app import employee_directory
+
+    api, h, cam, svc, _, _ = setup
+    monkeypatch.setattr(employee_directory, "get_employee", lambda e: {"RAHUL": {"name": "Rahul"}, "PUSH": {"name": "Pushpendra"}}.get(e))
+    now = time.time()
+    a1 = alerts.raise_alert("Intrusion Detected", "High", cam, "1 person inside Door", dedupe_key="intrusion:z:1", now=now - 60)
+    a2 = alerts.raise_alert("Intrusion Detected", "High", cam, "1 person inside Door", dedupe_key="intrusion:z:2", now=now - 30)
+    gate_box, seat_box = [100, 100, 200, 400], [600, 100, 700, 400]
+    known = {tuple(gate_box): "RAHUL", tuple(seat_box): "PUSH"}
+    ident = lambda cam_id, b, w, hh: known.get(tuple(b))  # noqa: E731
+    svc.name_people(a1, cam, [gate_box], 1280, 720, now, identify=ident)   # only the box inside the zone
+    svc.name_people(a2, cam, [[300, 100, 400, 400]], 1280, 720, now, identify=ident)   # face not recognised
+    who = {x["id"]: x["who"] for x in api.get("/api/intrusion/alerts", headers=h).json()["alerts"]}
+    assert who[a1] == "Rahul" and who[a2] == "Person"
+    # A second person coming in while it is still open is added to the same alert.
+    svc.name_people(a1, cam, [gate_box, [800, 100, 900, 400]], 1280, 720, now + 2,
+                    identify=lambda c, b, w, hh: {tuple(gate_box): "RAHUL"}.get(tuple(b), "PUSH"))
+    who = {x["id"]: x["who"] for x in api.get("/api/intrusion/alerts", headers=h).json()["alerts"]}
+    assert who[a1] in ("Pushpendra, Rahul", "Rahul, Pushpendra")
+
+
+def test_alert_on_entry_zone_alerts_when_anyone_comes_in_and_every_15_minutes():
+    """A hall: anyone coming in is an alert; staying gives no new alert until 15 min later,
+    then one more every 15 min; empty for longer than NEW_ALERT_AFTER_SECONDS = a new stay."""
+    from app import intrusion
+
+    svc = intrusion.IntrusionService()
+    every = 900
+    a = svc.stay_alert(16, 1000.0, every)
+    assert a["repeat"] == 0
+    keys = {svc.stay_alert(16, 1000.0 + t, every)["key"] for t in range(10, 890, 10)}
+    assert keys == {a["key"]}                                  # still there: the same alert
+    b = svc.stay_alert(16, 1000.0 + 900, every)
+    assert b["repeat"] == 1 and b["key"] != a["key"]           # 15 minutes: one more alert
+    assert svc.stay_alert(16, 1000.0 + 1000, every)["key"] == b["key"]
+    c = svc.stay_alert(16, 1000.0 + 1000 + intrusion.NEW_ALERT_AFTER_SECONDS + 5, every)
+    assert c["repeat"] == 0 and c["key"] not in (a["key"], b["key"])   # left and someone came in again

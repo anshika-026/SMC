@@ -1270,6 +1270,10 @@ export async function getFootfallHistory(from, to) {
 export async function getFootfallDay(date) {
   return request(`/footfall/day${qs({ date })}`);
 }
+// The day's footfall, one row per person (backend/app/site_footfall.py).
+export async function getFootfallSitePeople(date) {
+  return request(`/footfall/site-people${qs({ date })}`);
+}
 // ---- SMC Connect: WhatsApp Business notifications (backend/app/whatsapp.py) -----------------
 // Credentials stay on the server; these calls only read status and manage rules / recipients.
 // embeddedSignup hands Meta's 30-second code to the server, which exchanges and stores the token.

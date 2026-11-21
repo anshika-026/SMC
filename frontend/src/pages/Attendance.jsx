@@ -51,6 +51,8 @@ const LOCATION = {
   outside: { label: "Outside", cls: "badge-neutral" },
   likely_outside: { label: "Likely outside", cls: "badge-warning" },
   at_gate: { label: "At the gate", cls: "badge-neutral" },
+  // After office hours someone who left has gone home (not "outside").
+  left_for_day: { label: "Left for the day", cls: "badge-neutral" },
   unknown: { label: "Not seen recently", cls: "badge-neutral" },
 };
 

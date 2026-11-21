@@ -11,7 +11,7 @@ const HISTORY_LIMIT = 300;
 
 // One stored face capture (backend/app/visitor_routes.py employee-snapshots):
 // fetched with the session token, which a plain <img src> can't send.
-function Snapshot({ captureId, size = 40, onClick }) {
+export function Snapshot({ captureId, size = 40, onClick }) {
   const [url, setUrl] = useState(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {

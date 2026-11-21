@@ -11,7 +11,6 @@ import AlertClip from "../components/intrusion/AlertClip";
 import IntrusionKpiCards from "../components/intrusion/IntrusionKpiCards";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
-import { formatDuration } from "../lib/zoneSettings";
 
 // Intrusion Detection (backend/app/intrusion.py, ported from MAINDV): restricted areas and entry
 // gates alert when someone's feet are inside them during their active hours; loitering zones alert
@@ -256,7 +255,7 @@ function Activity({ filters: f, tick }) {
       ) : (
         <>
           <p className="text-xs text-slate-500">
-            {plural(rows.length, "alert")} · {n("Intrusion Detected")} intrusion · {n("Loitering Detected")} loitering
+            {plural(rows.length, "alert")}{n("Loitering Detected") ? ` · ${n("Loitering Detected")} loitering` : ""}
             {withVideo ? ` · ${withVideo} with video` : ""}
           </p>
           <DataTable
@@ -265,11 +264,6 @@ function Activity({ filters: f, tick }) {
             emptyLabel="No intrusion or loitering alerts for these filters."
             columns={[
               { key: "ts", label: "Detected", render: (r) => <span className="tabular-nums whitespace-nowrap">{when(r.ts)}</span> },
-              {
-                key: "event",
-                label: "Type",
-                render: (r) => <span className={`badge ${r.event === "Loitering Detected" ? "badge-warning" : "badge-danger"}`}>{TYPE_LABEL[r.event] || r.event}</span>,
-              },
               { key: "camera", label: "Camera", render: (r) => r.camera_name },
               {
                 key: "zone",
@@ -279,10 +273,18 @@ function Activity({ filters: f, tick }) {
                     {r.area ? `${r.area} · ` : ""}
                     {r.zone_name || "-"}
                     {r.is_entry_gate && <span className="badge badge-neutral text-[10px] ml-1">Entry gate</span>}
+                    {r.event === "Loitering Detected" && <span className="badge badge-warning text-[10px] ml-1">Loitering</span>}
                   </span>
                 ),
               },
-              { key: "duration", label: "Duration", render: (r) => formatDuration(r.duration_seconds) },
+              {
+                key: "who",
+                label: "Person",
+                render: (r) => (r.people?.length
+                  ? <span className="font-medium text-ink-900">{r.who}</span>
+                  : r.who === "Visitor" ? <span className="badge badge-warning">Visitor</span>
+                  : <span className="text-xs text-slate-500">{r.who}</span>),
+              },
               { key: "severity", label: "Severity", render: (r) => <StatusBadge value={r.severity} /> },
               { key: "status", label: "Status", render: (r) => <StatusBadge value={r.status} /> },
               {
@@ -303,6 +305,7 @@ function Activity({ filters: f, tick }) {
       <SidePanel open={!!selected} onClose={() => setSelected(null)} width="max-w-xl" title={selected ? `${TYPE_LABEL[selected.event] || selected.event} · ${selected.zone_name || ""}` : ""}>
         {selected && (
           <div className="space-y-4 text-sm">
+            {selected.has_snapshot && <AlertSnapshot alertId={selected.id} />}
             <AlertClip alertId={selected.id} clipStatus={selected.clip_status} label={`${selected.event} ${selected.zone_name}`} onPending={load} />
             {selected.message && <p className="text-ink-900">{selected.message}</p>}
             <dl className="grid grid-cols-3 gap-y-2">
@@ -312,7 +315,7 @@ function Activity({ filters: f, tick }) {
                 ["Zone", `${selected.zone_name || "-"}${selected.is_entry_gate ? " (entry gate)" : ""}`],
                 ["Detected", when(selected.ts)],
                 ["Last seen", when(selected.last_seen)],
-                ["Duration", formatDuration(selected.duration_seconds)],
+                ["Person", selected.who],
                 ["Severity", selected.severity],
                 ["Status", selected.status],
               ].map(([k, v]) => (
@@ -501,4 +504,25 @@ function Insights({ filters: f, tick }) {
       </div>
     </div>
   );
+}
+
+// The alert's snapshot (the frame with the person marked), fetched with the login header.
+function AlertSnapshot({ alertId }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let u = null;
+    let alive = true;
+    api.fetchAlertSnapshotObjectUrl(alertId).then((x) => {
+      if (!alive) return URL.revokeObjectURL(x);
+      u = x;
+      setUrl(x);
+      return undefined;
+    }).catch(() => {});
+    return () => {
+      alive = false;
+      if (u) URL.revokeObjectURL(u);
+    };
+  }, [alertId]);
+  if (!url) return null;
+  return <img src={url} alt="Snapshot of the intrusion" className="w-full rounded-xl border border-border-200" />;
 }

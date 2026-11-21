@@ -8,7 +8,7 @@ import { shiftIso, todayIso } from "./workforce/shared";
 const REFRESH_MS = 15_000;
 
 // Quick ranges for the calendar; "All time" leaves both dates empty.
-const RANGES = [
+export const RANGES = [
   ["today", "Today", () => [todayIso(), todayIso()]],
   ["7", "Last 7 days", () => [shiftIso(todayIso(), -6), todayIso()]],
   ["30", "Last 30 days", () => [shiftIso(todayIso(), -29), todayIso()]],
@@ -23,30 +23,32 @@ export function fmtDuration(seconds) {
   return `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
-// Who the camera recognised while a visit lasted (visitors.faces_during_visits): employees, then
-// "possible" matches, then the count of faces nobody matched.
-function FacesSeen({ f }) {
-  if (!f) return <span className="text-xs text-slate-400">-</span>;
-  const top = f.employees.slice(0, 2);
-  const more = f.employees.length - top.length;
-  if (!top.length && !f.possible.length && !f.unknown) return <span className="text-xs text-slate-400" title="The camera captured no face during this visit">No face seen</span>;
+// The visitor's number (#1, #2, ...): the backend gives each visitor one, and the same person
+// keeps it when they come back (visitors.assign_visitor_numbers). A visitor is someone who is
+// not an employee; employees in the area at the time are listed only as "also there".
+export function FacesSeen({ v }) {
+  if (!v) return <span className="text-xs text-slate-400">-</span>;
+  const also = v.employees_present || [];
   return (
-    <div className="flex flex-wrap items-center gap-1 max-w-[260px]">
-      {top.map((e) => (
-        <span key={e.employee_id} className="badge badge-success" title={`${e.name}: recognised in ${e.faces} face picture(s) on this camera during the visit`}>{e.name}</span>
-      ))}
-      {more > 0 && <span className="text-[11px] text-slate-500" title={f.employees.slice(2).map((e) => e.name).join(", ")}>+{more}</span>}
-      {!top.length && f.possible.slice(0, 1).map((e) => (
-        <span key={e.employee_id} className="badge badge-neutral" title={`Possible match, not confirmed (${e.faces} face picture(s))`}>maybe {e.name}</span>
-      ))}
-      {!top.length && !f.possible.length && <span className="badge badge-warning" title={`${f.unknown} face picture(s), none matched an employee`}>Unknown face</span>}
+    <div className="max-w-[260px]">
+      <span className="font-medium text-ink-900">{v.visitor_number ? `Visitor #${v.visitor_number}` : "Visitor"}</span>
+      {v.visitor_visits > 1 && (
+        <span className="text-[11px] text-slate-500 ml-1.5" title="The same face was seen on other visits">came {v.visitor_visits} times</span>
+      )}
+      {!v.visitor_number && <div className="text-[11px] text-slate-400">number given when the visit ends</div>}
+      {also.length > 0 && (
+        <div className="text-[11px] text-slate-400 mt-0.5" title="Employees in the area at the same time (not the visitor)">
+          Also there: {also.map((e) => e.name).join(", ")}
+        </div>
+      )}
     </div>
   );
 }
 
 // Visitor history: one row per visit (a person's continuous stay), so repeat
 // alerts of the same stay never show as extra visitors. Employees are never
-// in here (see VisitorEmployees). Kept after the clips are deleted.
+// in here, nor sittings that were an employee's (see VisitorEmployees). Kept
+// after the clips are deleted.
 export default function VisitorHistory({ cameras, onOpenEvent }) {
   const [rows, setRows] = useState(null);
   const [error, setError] = useState("");
@@ -84,7 +86,7 @@ export default function VisitorHistory({ cameras, onOpenEvent }) {
         <div>
           <h3 className="text-sm font-semibold text-ink-900">Visitor history</h3>
           <p className="text-xs text-slate-500">
-            One row per visit by someone not recognised while seated. "Faces seen" names who the camera recognised during the visit: usually that employee, unrecognised while seated.
+            One row per visit by someone who is not an employee. Sittings that were an employee's are not listed here.
             {rows && ` ${rows.length} visit${rows.length === 1 ? "" : "s"}${from || to ? " in this period" : " in total"}.`}
           </p>
         </div>
@@ -123,7 +125,7 @@ export default function VisitorHistory({ cameras, onOpenEvent }) {
             <thead>
               <tr>
                 <th>Arrived</th>
-                <th title="Faces the camera recognised while this visit lasted (anyone in view, not proof of who sat there)">Faces seen</th>
+                <th>Visitor</th>
                 <th>Camera</th>
                 <th>Last seen</th>
                 <th>Stayed</th>
@@ -136,7 +138,7 @@ export default function VisitorHistory({ cameras, onOpenEvent }) {
               {rows.map((v) => (
                 <tr key={v.visit}>
                   <td>{fmtDateTime(v.arrived_at)}</td>
-                  <td><FacesSeen f={v.faces_seen} /></td>
+                  <td><FacesSeen v={v} /></td>
                   <td>{v.camera_name}</td>
                   <td>{v.last_seen ? fmtTime(v.last_seen) : "-"}</td>
                   <td>{fmtDuration(v.duration_seconds)}</td>

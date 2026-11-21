@@ -30,6 +30,14 @@ LINE_MARGIN = 0.15       # staff/config.py line_margin
 CONFIRM_SECONDS = 1.0    # staff/config.py crossing_confirm_seconds
 LOST_SECONDS = 2.0       # unseen this long while pending "in" = walked in out of view
 FORGET_SECONDS = 15.0    # unseen this long = forgotten
+# Walked in: someone first seen inside the gate area (often already past the line, because the
+# door frame hides them as they come through) who then moves this far further in, away from the
+# line, came in. People going out move the other way and are never marked. Fraction of the
+# frame height.
+WALK_IN_FRACTION = 0.06
+# ... and only someone who first appeared this close to the line (fraction of the frame height):
+# a person already well inside who walks across the area did not come in.
+NEAR_LINE_FRACTION = 0.15
 
 
 @dataclass
@@ -38,7 +46,18 @@ class _Track:
     pending: str | None = None
     pending_since: float = 0.0
     last_seen: float = 0.0
+    first_dist: float | None = None     # signed distance to the line (+ = inside) when first seen
+    came_in: bool = False               # already marked as having come in (one entry per track)
     bbox: list | None = None
+
+
+def signed_distance(foot, line, inside_sign: int, w: int, h: int) -> float:
+    """Pixels from the line, positive on the inside."""
+    (x1, y1), (x2, y2) = line
+    ax, ay, bx, by = x1 * w, y1 * h, x2 * w, y2 * h
+    abx, aby = bx - ax, by - ay
+    length = (abx * abx + aby * aby) ** 0.5 or 1.0
+    return (abx * (foot[1] - ay) - aby * (foot[0] - ax)) / length * (1 if inside_sign >= 0 else -1)
 
 
 def side_of(foot, line, inside_sign: int, w: int, h: int) -> tuple[str, bool]:
@@ -76,6 +95,16 @@ class GateCounter:
             seen.add(tid)
             tr = tracks.setdefault(tid, _Track())
             tr.last_seen, tr.bbox = ts, b
+            dist = signed_distance(foot, line, inside_sign, w, h)
+            if tr.first_dist is None:
+                tr.first_dist = dist
+            # Only for someone first seen already at / past the line (the door hid their crossing);
+            # anyone first seen outside is judged by the crossing itself below.
+            if (not tr.came_in and -BAND_PX < tr.first_dist <= NEAR_LINE_FRACTION * h and dist > BAND_PX
+                    and dist - tr.first_dist >= WALK_IN_FRACTION * h):
+                tr.came_in = True                  # walked further in from where they appeared
+                entries.append({"track_id": tid, "bbox": b})
+                continue
             if where == "band" or not alongside:
                 continue
             if tr.side is None:
@@ -87,14 +116,16 @@ class GateCounter:
             if tr.pending != where:
                 tr.pending, tr.pending_since = where, ts
             if ts - tr.pending_since >= CONFIRM_SECONDS:
-                if self._confirm(tr):
+                if self._confirm(tr) and not tr.came_in:
+                    tr.came_in = True
                     entries.append({"track_id": tid, "bbox": b})
         for tid, tr in list(tracks.items()):
             if tid in seen:
                 continue
             gone = ts - tr.last_seen
             if tr.pending and gone >= LOST_SECONDS:
-                if self._confirm(tr):              # walked in and out of view
+                if self._confirm(tr) and not tr.came_in:   # walked in and out of view
+                    tr.came_in = True
                     entries.append({"track_id": tid, "bbox": tr.bbox})
             if gone >= FORGET_SECONDS:
                 del tracks[tid]
@@ -104,6 +135,8 @@ class GateCounter:
     def _confirm(tr: _Track) -> bool:
         came_in = tr.side == "out" and tr.pending == "in"
         tr.side, tr.pending = tr.pending, None
+        if tr.side == "out":
+            tr.came_in = False                     # went back out: coming in again is a new entry
         return came_in
 
     def reset_zone(self, zone_id: int) -> None:

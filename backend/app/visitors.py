@@ -43,9 +43,9 @@ Clip           A rolling buffer of the last few seconds per camera that has an
                encoded to an H.264 MP4 on a background thread (live video and
                detection never wait for it).
 Retention      Every event carries an expiry, so nothing is kept forever:
-                 expires_at = departure + RETENTION_AFTER_DEPARTURE_HOURS (24 h)
+                 expires_at = departure + RETENTION_AFTER_DEPARTURE_HOURS (48 h)
                and if the departure is never established, at the latest
-                 entry + MAX_PRESENCE_HOURS + RETENTION_AFTER_DEPARTURE_HOURS (36 h).
+                 entry + MAX_PRESENCE_HOURS + RETENTION_AFTER_DEPARTURE_HOURS (60 h).
                A backend job deletes the clip file and the event row after that;
                old links then answer 404/410. Areas live in their own table and
                are never touched by this clean-up.
@@ -91,7 +91,15 @@ EMPLOYEE_MATCH_IOU = 0.3
 # waits until the person has been in the area this long, so their face can be
 # identified before anyone is called a visitor (a later identification still
 # takes a wrong alert back).
-VERIFY_SECONDS = float(os.environ.get("VISITOR_VERIFY_SECONDS", "30"))
+# 60 s (was 30): employees sitting down were sometimes alerted as visitors, with a clip, before
+# face recognition had named them.
+VERIFY_SECONDS = float(os.environ.get("VISITOR_VERIFY_SECONDS", "60"))
+# A second box over an employee already recognised in the area (overlapping this much) is the
+# same employee detected twice, not a visitor.
+DUPLICATE_OF_EMPLOYEE_IOU = 0.5
+# A clip still "pending" this long after its visit began was cut off (the backend restarted
+# while recording): it is marked failed, so it shows "could not be saved", not "recorded".
+STUCK_CLIP_SECONDS = 30 * 60
 # How often the faces inside unverified visitors' boxes are identified, per camera.
 FACE_CHECK_SECONDS = float(os.environ.get("VISITOR_FACE_CHECK_SECONDS", "1"))
 FACE_CHECKS_PER_CYCLE = 3
@@ -104,7 +112,7 @@ PRE_SECONDS = clips.PRE_SECONDS
 POST_SECONDS = clips.POST_SECONDS
 MAX_CLIPS_DISK_MB = int(os.environ.get("VISITOR_MAX_CLIPS_DISK_MB", "2000"))
 
-RETENTION_AFTER_DEPARTURE_HOURS = float(os.environ.get("VISITOR_RETENTION_AFTER_DEPARTURE_HOURS", "24"))
+RETENTION_AFTER_DEPARTURE_HOURS = float(os.environ.get("VISITOR_RETENTION_AFTER_DEPARTURE_HOURS", "48"))  # clips kept at least 2 days
 MAX_PRESENCE_HOURS = float(os.environ.get("VISITOR_MAX_PRESENCE_HOURS", "12"))
 PURGE_INTERVAL_SECONDS = 300
 HOUSEKEEPING_SECONDS = 5
@@ -116,6 +124,18 @@ FEATURE = "visitors"
 def _conn():
     """Shared connection policy (app/db.py)."""
     return db.connect(DB_PATH, row_factory=sqlite3.Row)
+
+
+def fail_stuck_clips(now: float | None = None) -> int:
+    """Clips still 'pending' long after their visit began were cut off (e.g. a restart while
+    recording): marked failed, so the page says the video could not be saved."""
+    now = now if now is not None else time.time()
+    with _conn() as conn:
+        n = conn.execute("UPDATE visitor_events SET clip_status = 'failed', clip_error = 'recording was interrupted'"
+                         " WHERE clip_status = 'pending' AND entered_at < ?", (now - STUCK_CLIP_SECONDS,)).rowcount
+    if n:
+        log.info("visitors: %d interrupted clip(s) marked failed", n)
+    return n
 
 
 def init_db() -> None:
@@ -198,6 +218,24 @@ def init_db() -> None:
                    left_at REAL)"""
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor_area_employee_log_ts ON visitor_area_employee_log (entered_at)")
+        # Visitor numbers (#1, #2, ...): one per person, kept when the same face comes back
+        # (assign_visitor_numbers). embedding = sum of the visits' mean face embeddings.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS visitor_identities (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   embedding TEXT,
+                   faces INTEGER NOT NULL DEFAULT 0,
+                   visits INTEGER NOT NULL DEFAULT 0,
+                   first_seen REAL,
+                   last_seen REAL)"""
+        )
+        # visit -> its visitor number; identity_id NULL = the sitting was an employee's.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS visitor_visit_identity (
+                   visit TEXT PRIMARY KEY,
+                   identity_id INTEGER,
+                   assigned_at REAL NOT NULL)"""
+        )
         # Alerts recorded before this table existed (still within retention).
         conn.execute(
             "INSERT OR IGNORE INTO visitor_report_log (event_id, camera_id, camera_name, visit_key, alert_seq, entered_at, alert_at, left_at, departure) "
@@ -360,7 +398,15 @@ def kpis(now: float | None = None, day: str | None = None) -> dict:
                 else datetime.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0))
     day_start = start_dt.timestamp()
     day_end = (start_dt + datetime.timedelta(days=1)).timestamp()
-    visits = list_visits(limit=10_000, since=day_start, until=day_end)
+    # Sittings that were an employee's (see mark_employee_sittings) are not visitors, and one
+    # visitor's rows of one stay are one visit (merge_same_visitor).
+    assign_visitor_numbers()
+    visits = [v for v in mark_employee_sittings(list_visits(limit=10_000, since=day_start, until=day_end))
+              if v["kind"] == "visitor"]
+    numbers = visitor_numbers([v["visit"] for v in visits])
+    for v in visits:
+        v["visitor_number"] = (numbers.get(v["visit"]) or {}).get("number")
+    visits = merge_same_visitor(visits)
     hourly: dict[int, int] = {}
     for v in visits:
         h = datetime.datetime.fromtimestamp(v["arrived_at"]).hour
@@ -455,9 +501,10 @@ def employee_stay_snapshots(stays: list[dict]) -> dict[int, list[dict]]:
 _VISIT_FACES_SQL = (
     "SELECT COALESCE(NULLIF(verified_employee_id, ''), NULLIF(employee_id, ''),"
     " CASE WHEN auto_tier = 'auto' THEN NULLIF(auto_employee_id, '') END) AS emp,"
-    " CASE WHEN auto_tier = 'review' THEN NULLIF(auto_employee_id, '') END AS maybe, COUNT(*) AS n"
+    " CASE WHEN auto_tier = 'review' THEN NULLIF(auto_employee_id, '') END AS maybe,"
+    " embedding IS NOT NULL AS compared, COUNT(*) AS n"
     " FROM face_training_captures WHERE camera_id = ? AND captured_at BETWEEN ? AND ? AND deleted_at IS NULL"
-    " GROUP BY emp, maybe"
+    " GROUP BY emp, maybe, compared"
 )
 
 
@@ -479,9 +526,197 @@ def faces_during_visits(visits: list[dict]) -> dict[str, dict]:
                     res["employees"][r["emp"]] = res["employees"].get(r["emp"], 0) + r["n"]
                 elif r["maybe"]:
                     res["possible"][r["maybe"]] = res["possible"].get(r["maybe"], 0) + r["n"]
-                else:
+                elif r["compared"]:
+                    # Only a face that was compared with the employees (it has an embedding) and
+                    # matched nobody counts; a crop too small or blurred to compare says nothing.
                     res["unknown"] += r["n"]
             out[v["visit"]] = res
+    return out
+
+
+def mark_employee_sittings(visits: list[dict], faces: dict[str, dict] | None = None) -> list[dict]:
+    """A visitor is someone who is not an employee. Sets on each visit:
+      employees_present  employees recognised on the visit's camera while it lasted, or sitting in
+                         that visitor area at the same time (visitor_area_employee_log)
+      kind               "employee" when an employee was there and no face that matched nobody was
+                         seen: the seated person was that employee, tracked without a face match
+                         (their own employee row already shows the sitting); "visitor" otherwise,
+                         i.e. a face matched no employee, or nobody recognised was there at all."""
+    if not visits:
+        return visits
+    faces = faces if faces is not None else faces_during_visits(visits)
+    stays = list_employee_visits(limit=100_000)
+    m = _STAY_MARGIN_SECONDS
+    for v in visits:
+        f = faces.get(v["visit"]) or {"employees": {}, "possible": {}, "unknown": 0}
+        end = v.get("left_at") or v.get("last_seen") or v["arrived_at"]
+        there = {s["employee_id"] for s in stays
+                 if s["camera_id"] == v["camera_id"] and s["arrived_at"] - m <= end
+                 and (s.get("left_at") or s.get("last_seen") or s["arrived_at"]) + m >= v["arrived_at"]}
+        there |= set(f["employees"])
+        v["employees_present"] = sorted(there)
+        v["kind"] = "visitor" if f["unknown"] > 0 or not there else "employee"
+    return visits
+
+
+# Average cosine similarity to a visitor's earlier visits needed to be that visitor again (0.5:
+# measured on this site's visitor-area faces, it kept groups apart that 0.45 merged).
+VISITOR_MATCH_THRESHOLD = float(os.environ.get("VISITOR_MATCH_THRESHOLD", "0.5"))
+_UNKNOWN_FACES_SQL = (
+    "SELECT embedding FROM face_training_captures WHERE camera_id = ? AND captured_at BETWEEN ? AND ?"
+    " AND deleted_at IS NULL AND embedding IS NOT NULL"
+    " AND COALESCE(NULLIF(verified_employee_id, ''), NULLIF(employee_id, '')) IS NULL"
+    " AND NOT (COALESCE(auto_tier, '') IN ('auto', 'review') AND COALESCE(auto_employee_id, '') <> '')"
+)
+_numbers_lock = threading.Lock()
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    n = float(np.linalg.norm(v))
+    return v / n if n else v
+
+
+def assign_visitor_numbers() -> int:
+    """Gives every visitor a number (#1, #2, ...), oldest first, and keeps it: a visit whose
+    faces (compared, matching no employee) look like an earlier visitor's (their mean face's
+    cosine similarity, averaged over that visitor's earlier visits, >= VISITOR_MATCH_THRESHOLD;
+    an average over visits, so a visitor seen often does not start matching everyone) gets
+    that visitor's number, on any day; otherwise a new number. A visit with no usable face gets a new number of its own
+    (it can't be matched). Sittings that were an employee's get none. A visit is numbered
+    once it has ended, or earlier as soon as it has a face. Returns how many visits were
+    numbered."""
+    with _numbers_lock:
+        with _conn() as conn:
+            done = {r[0] for r in conn.execute("SELECT visit FROM visitor_visit_identity")}
+        todo = sorted((v for v in list_visits(limit=10_000_000) if v["visit"] not in done), key=lambda v: v["arrived_at"])
+        if not todo:
+            return 0
+        mark_employee_sittings(todo)
+        numbered = 0
+        with _conn() as conn:
+            has_faces = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'face_training_captures'").fetchone()
+            # id -> (sum of the visits' unit mean faces, visits): sum @ face / visits = average similarity
+            known = {r[0]: (np.array(json.loads(r[1]), dtype=np.float32), r[2])
+                     for r in conn.execute("SELECT id, embedding, visits FROM visitor_identities WHERE embedding IS NOT NULL")}
+            for v in todo:
+                end = (v.get("left_at") or v.get("last_seen") or v["arrived_at"]) + _STAY_MARGIN_SECONDS
+                faces = [_unit(np.array(json.loads(r[0]), dtype=np.float32))
+                         for r in conn.execute(_UNKNOWN_FACES_SQL, (v["camera_id"], v["arrived_at"] - _STAY_MARGIN_SECONDS, end))] if has_faces else []
+                if v["status"] == "inside" and not faces:
+                    continue                                   # wait for a face, or for the visit to end
+                now = time.time()
+                if v["kind"] != "visitor":
+                    conn.execute("INSERT OR IGNORE INTO visitor_visit_identity (visit, identity_id, assigned_at) VALUES (?, NULL, ?)",
+                                 (v["visit"], now))
+                    continue
+                if faces:
+                    mean = _unit(np.mean(faces, axis=0))
+                    score = {i: float(total @ mean) / n for i, (total, n) in known.items()}
+                    ident = max(score, key=score.get, default=None)
+                    if ident is not None and score[ident] >= VISITOR_MATCH_THRESHOLD:
+                        total, n = known[ident]
+                        total = total + mean
+                        conn.execute("UPDATE visitor_identities SET embedding = ?, faces = faces + ?, visits = visits + 1,"
+                                     " last_seen = MAX(last_seen, ?) WHERE id = ?",
+                                     (json.dumps(total.tolist()), len(faces), v["arrived_at"], ident))
+                        known[ident] = (total, n + 1)
+                    else:
+                        ident = conn.execute("INSERT INTO visitor_identities (embedding, faces, visits, first_seen, last_seen)"
+                                             " VALUES (?, ?, 1, ?, ?)",
+                                             (json.dumps(mean.tolist()), len(faces), v["arrived_at"], v["arrived_at"])).lastrowid
+                        known[ident] = (mean, 1)
+                else:
+                    ident = conn.execute("INSERT INTO visitor_identities (embedding, faces, visits, first_seen, last_seen)"
+                                         " VALUES (NULL, 0, 1, ?, ?)", (v["arrived_at"], v["arrived_at"])).lastrowid
+                conn.execute("INSERT OR IGNORE INTO visitor_visit_identity (visit, identity_id, assigned_at) VALUES (?, ?, ?)",
+                             (v["visit"], ident, now))
+                numbered += 1
+        if numbered:
+            log.info("visitors: %d visit(s) numbered", numbered)
+        return numbered
+
+
+# The same visitor seen again on the same camera within this long (or while their previous row
+# is still open) is the same visit: the person detector briefly lost them and picked them up as
+# a new person, which opened a second row. Longer than this apart is a new visit.
+SAME_VISIT_GAP_SECONDS = float(os.environ.get("VISITOR_SAME_VISIT_GAP_SECONDS", "300"))
+
+
+def _end(v: dict) -> float:
+    return v.get("left_at") or v.get("last_seen") or v["arrived_at"]
+
+
+def merge_same_visitor(rows: list[dict], gap: float | None = None) -> list[dict]:
+    """One row per visit: rows of the same visitor number that overlap or are less than
+    SAME_VISIT_GAP_SECONDS apart are joined, on any camera (one person is never shown in two
+    rows at the same time; the cameras are listed together) (first arrival, last time seen,
+    alerts added up, inside if any part still is; the newest clip). Rows without a number are
+    left as they are. Newest first."""
+    gap = SAME_VISIT_GAP_SECONDS if gap is None else gap
+    out: list[dict] = []
+    open_: dict[tuple, dict] = {}
+    for r in sorted(rows, key=lambda r: r["arrived_at"]):
+        n = r.get("visitor_number")
+        if not n:
+            out.append(r)
+            continue
+        key = n
+        cur = open_.get(key)
+        if cur is not None and r["arrived_at"] <= _end(cur) + gap:
+            inside = cur["status"] == "inside" or r["status"] == "inside"
+            last = max(cur.get("last_seen") or cur["arrived_at"], r.get("last_seen") or r["arrived_at"])
+            newer = r if (r.get("last_alert_at") or 0) >= (cur.get("last_alert_at") or 0) else cur
+            cur.update(
+                last_seen=last,
+                left_at=None if inside else max(cur.get("left_at") or 0, r.get("left_at") or 0) or None,
+                status="inside" if inside else "left",
+                duration_seconds=max(0.0, last - cur["arrived_at"]),
+                alerts=cur.get("alerts", 0) + r.get("alerts", 0),
+                last_alert_at=max(cur.get("last_alert_at") or 0, r.get("last_alert_at") or 0) or None,
+                latest_event_id=newer.get("latest_event_id") or cur.get("latest_event_id") or r.get("latest_event_id"),
+            )
+            if "employees_present" in cur:
+                seen = {e["employee_id"] if isinstance(e, dict) else e: e for e in cur["employees_present"] + r.get("employees_present", [])}
+                cur["employees_present"] = list(seen.values())
+            if "faces_seen" in cur and "faces_seen" in r:
+                cur["faces_seen"]["unknown"] += r["faces_seen"].get("unknown", 0)
+            if r.get("camera_name") and r["camera_name"] not in (cur.get("camera_name") or "").split(", "):
+                cur["camera_name"] = ", ".join(filter(None, [cur.get("camera_name"), r["camera_name"]]))
+            cur.setdefault("merged_visits", [cur["visit"]]).append(r["visit"])
+            continue
+        open_[key] = r
+        out.append(r)
+    return sorted(out, key=lambda r: r["arrived_at"], reverse=True)
+
+
+def visit_counts(numbers: set[int]) -> dict[int, int]:
+    """{visitor number: how many separate visits they have made, all days} (merge_same_visitor)."""
+    if not numbers:
+        return {}
+    with _conn() as conn:
+        ident = {r[0]: r[1] for r in conn.execute("SELECT visit, identity_id FROM visitor_visit_identity WHERE identity_id IS NOT NULL")}
+    rows = []
+    for v in list_visits(limit=10_000_000):
+        n = ident.get(v["visit"])
+        if n in numbers:
+            v["visitor_number"] = n
+            rows.append(v)
+    out: dict[int, int] = {}
+    for v in merge_same_visitor(rows):
+        out[v["visitor_number"]] = out.get(v["visitor_number"], 0) + 1
+    return out
+
+
+def visitor_numbers(visit_keys: list[str]) -> dict[str, dict]:
+    """{visit: {"number": n, "visits": how many visits that visitor has made}} for numbered visits."""
+    out: dict[str, dict] = {}
+    with _conn() as conn:
+        for i in range(0, len(visit_keys), 500):
+            chunk = visit_keys[i:i + 500]
+            q = ("SELECT m.visit, i.id, i.visits FROM visitor_visit_identity m JOIN visitor_identities i ON i.id = m.identity_id"
+                 " WHERE m.visit IN (" + ",".join("?" * len(chunk)) + ")")
+            for r in conn.execute(q, chunk):
+                out[r[0]] = {"number": r[1], "visits": r[2]}
     return out
 
 
@@ -651,6 +886,10 @@ class VisitorService:
         self._started = True
         self.refresh()
         self._close_orphaned_open_events()
+        try:
+            fail_stuck_clips()
+        except sqlite3.Error:
+            log.exception("visitors: could not check for interrupted clips")
         for target, name in ((self._housekeeping_loop, "visitors-housekeeping"), (self._purge_loop, "visitors-purge")):
             threading.Thread(target=target, daemon=True, name=name).start()
 
@@ -841,6 +1080,11 @@ class VisitorService:
             return
         if not v.alert_ids and not self._identification_done(camera_id, v, ts):
             return  # still giving face recognition its chance to name an employee
+        if not v.alert_ids:
+            twin = self.employee_twin(camera_id, v, ts)
+            if twin is not None:
+                self._mark_employee(camera_id, v, twin)   # the same employee, detected twice
+                return
         self._alert(camera_id, v, ts, w, h)
         v.kind = "visitor"
         v.next_due = ts + REPEAT_ALERT_MINUTES * 60 if REPEAT_ALERT_MINUTES > 0 else float("inf")
@@ -867,6 +1111,16 @@ class VisitorService:
         v.last_written = ts
         log.info("visitors: alert %s (#%d of visit %s) - unknown person in the area on camera %s", event_id, seq, v.key, camera_id)
         self._schedule_clip(event_id, camera_id, ts)
+
+    def employee_twin(self, camera_id: int, v: _Visit, ts: float) -> str | None:
+        """The employee whose recognised visit on this camera, seen just now, overlaps this
+        visit's box (DUPLICATE_OF_EMPLOYEE_IOU): the same person detected twice."""
+        for other in self._open.get(camera_id, {}).values():
+            if (other is not v and other.kind == "employee" and other.employee_id
+                    and ts - other.last_in <= PRESENCE_BREAK_SECONDS + 2
+                    and _iou(other.bbox, v.bbox) >= DUPLICATE_OF_EMPLOYEE_IOU):
+                return other.employee_id
+        return None
 
     def _mark_employee(self, camera_id: int, v: _Visit, employee_id: str) -> None:
         """Recognised as an enrolled person: no alerts for this visit, and an

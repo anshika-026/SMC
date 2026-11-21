@@ -31,6 +31,7 @@ import concurrent.futures
 import datetime
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -49,6 +50,13 @@ DB_PATH = config.DB_PATH
 CYCLE_SECONDS = 1.0
 PERSON_CONF = 0.45
 EVENT_LOG_SECONDS = 30
+# One alert per intrusion: someone seen in a zone that has been empty for longer than this is
+# a new intrusion with its own alert (snapshot and clip). Before, every detection was added to
+# the zone's one open alert until someone resolved it by hand, so an alert left open for days
+# swallowed every later intrusion and the alert list showed none of them.
+NEW_ALERT_AFTER_SECONDS = float(os.environ.get("INTRUSION_NEW_ALERT_AFTER_SECONDS", "120"))
+# How often face recognition is asked who is inside the zone while an alert is going on.
+NAME_EVERY_SECONDS = 1.0
 SYNC_INTERVAL_SECONDS = 15
 ZONE_TYPES = ("restricted", "loitering")     # restricted = a person inside at all (the original behaviour)
 SEVERITIES = alerts.SEVERITIES
@@ -98,7 +106,10 @@ def init_db() -> None:
                          # SMC: the area a zone belongs to, and whether it is an entry gate.
                          ("area", "TEXT"), ("is_entry_gate", "INTEGER NOT NULL DEFAULT 0"),
                          # SMC: an entry gate's line and which side is inside (gate_crossing.py).
-                         ("entry_line", "TEXT"), ("inside_sign", "INTEGER NOT NULL DEFAULT 1")):
+                         ("entry_line", "TEXT"), ("inside_sign", "INTEGER NOT NULL DEFAULT 1"),
+                         # SMC: a loitering zone that alerts when anyone comes in, then again every
+                         # dwell_seconds while people are still there (_loiter_on_entry).
+                         ("alert_on_entry", "INTEGER NOT NULL DEFAULT 0")):
             if col not in have:
                 conn.execute(f"ALTER TABLE intrusion_zones ADD COLUMN {col} {ddl}")
 
@@ -115,6 +126,7 @@ def _zone(row) -> dict:
     d["area"] = d.get("area") or ""
     d["entry_line"] = json.loads(d["entry_line"]) if d.get("entry_line") else None
     d["inside_sign"] = -1 if (d.get("inside_sign") or 1) < 0 else 1
+    d["alert_on_entry"] = bool(d.get("alert_on_entry"))
     return d
 
 
@@ -153,7 +165,7 @@ def create_zone(camera_id: int, name: str, polygon: list, active_from: str | Non
 def update_zone(zone_id: int, **fields) -> dict | None:
     allowed = {k: v for k, v in fields.items() if k in (
         "name", "active_from", "active_to", "enabled", "polygon", "zone_type", "dwell_seconds", "grace_seconds",
-        "severity", "alerts_enabled", "area", "is_entry_gate", "entry_line", "inside_sign")}
+        "severity", "alerts_enabled", "area", "is_entry_gate", "entry_line", "inside_sign", "alert_on_entry")}
     if allowed:
         if "entry_line" in allowed:
             allowed["entry_line"] = json.dumps(allowed["entry_line"]) if allowed["entry_line"] else None
@@ -280,6 +292,7 @@ def list_alerts(start_ts: float, end_ts: float, camera_id: int | None = None, zo
     zones = {z["id"]: z for z in list_zones()}
     out = []
     needle = (q or "").strip().lower()
+    names: dict[str, str] = {}
     for r in rows:
         cam = cams.get(r["camera_id"]) or {}
         zone = zones.get(r["zone_id"]) or {}
@@ -297,7 +310,16 @@ def list_alerts(start_ts: float, end_ts: float, camera_id: int | None = None, zo
             "clip_status": r.get("clip_status"), "has_clip": r.get("clip_status") == "ready",
             "has_snapshot": bool(r.get("snapshot_path")),
         }
-        if needle and needle not in " ".join(str(item[k]) for k in ("camera_name", "zone_name", "area", "message", "event", "site")).lower():
+        people = []
+        for emp in [e for e in (r.get("employee_id") or "").split(",") if e]:
+            if emp not in names:
+                from app import employee_directory
+                names[emp] = (employee_directory.get_employee(emp) or {}).get("name") or emp
+            people.append({"employee_id": emp, "name": names[emp]})
+        item["people"] = people
+        # Who came in: the employees face recognition named INSIDE the zone (name_people).
+        item["who"] = ", ".join(p["name"] for p in people) if people else "Person"
+        if needle and needle not in " ".join(str(item[k]) for k in ("camera_name", "zone_name", "area", "message", "event", "site", "who")).lower():
             continue
         out.append(item)
     return out
@@ -376,6 +398,10 @@ class IntrusionService:
         self._executors: dict[int, concurrent.futures.ThreadPoolExecutor] = {}
         self._futures: dict[int, concurrent.futures.Future] = {}
         self._last_logged: dict[int, float] = {}
+        self._episodes: dict[int, tuple[str, float]] = {}   # zone id -> (alert dedupe key, last seen)
+        self._stays: dict[int, dict] = {}                   # alert-on-entry loitering zone id -> its current stay
+        self._named: dict[int, set[str]] = {}               # alert id -> employees named inside its zone
+        self._name_tried: dict[int, float] = {}             # alert id -> last time we asked face recognition
         self._sinks: dict[int, _KeepAliveSink] = {}
         self._health: dict[int, resilience.FeatureHealth] = {}
         self._loiter = loitering.LoiterTracker()
@@ -489,15 +515,26 @@ class IntrusionService:
                 with _conn() as conn:
                     conn.execute("INSERT INTO intrusion_events (zone_id, camera_id, ts, people) VALUES (?, ?, ?, ?)",
                                  (zone["id"], camera_id, now, len(inside)))
+            key = self.episode_key(zone["id"], now)
             if not zone.get("alerts_enabled", True):
                 continue                                  # this zone's alerts are switched off; events are still logged
-            alerts.raise_alert(
+            aid = alerts.raise_alert(
                 "Intrusion Detected", zone.get("severity") or "High", camera_id,
                 message=f"{len(inside)} {'person' if len(inside) == 1 else 'people'} inside {zone['name']}",
-                dedupe_key=f"intrusion:{zone['id']}", snapshot_jpeg=_annotate(frame, zone, inside), now=now,
+                dedupe_key=key, snapshot_jpeg=_annotate(frame, zone, inside), now=now,
                 zone_id=zone["id"], zone_name=zone["name"],
                 on_created=lambda aid: evidence.service.schedule(aid, camera_id, now),
             )
+            self.name_people(aid, camera_id, inside, w, h, now)
+
+    def episode_key(self, zone_id: int, now: float) -> str:
+        """The dedupe key of the intrusion going on in this zone: the same key while people keep
+        being seen, a new one (a new alert) once the zone was empty for NEW_ALERT_AFTER_SECONDS."""
+        key, last = self._episodes.get(zone_id, (None, 0.0))
+        if key is None or now - last > NEW_ALERT_AFTER_SECONDS:
+            key = f"intrusion:{zone_id}:{int(now)}"
+        self._episodes[zone_id] = (key, now)
+        return key
 
     def _mark_entry(self, camera_id: int, frame: np.ndarray, zone: dict, entry: dict, now: float) -> None:
         """One person came in through an entry gate: logged, and (alerts on) their own alert + clip."""
@@ -506,20 +543,87 @@ class IntrusionService:
                          (zone["id"], camera_id, now))
         if not zone.get("alerts_enabled", True):
             return
-        alerts.raise_alert(
+        aid = alerts.raise_alert(
             "Intrusion Detected", zone.get("severity") or "High", camera_id,
             message=f"1 person came in through {zone['name']}",
             snapshot_jpeg=_annotate(frame, zone, [entry["bbox"]]), now=now,
             zone_id=zone["id"], zone_name=zone["name"],
             on_created=lambda aid: evidence.service.schedule(aid, camera_id, now),
         )
+        h, w = frame.shape[:2]
+        self.name_people(aid, camera_id, [entry["bbox"]], w, h, now)
+
+    def _loiter_on_entry(self, camera_id: int, frame: np.ndarray, zones: list[dict], now: float, people: list) -> None:
+        """Alert-on-entry loitering zones (e.g. a hall): anyone who comes in (employee or not) raises
+        a loitering alert; while people stay there is no new alert until dwell_seconds later, then
+        one more, and so on. Once the zone was empty for NEW_ALERT_AFTER_SECONDS the next person is
+        a new stay with its own alert."""
+        h, w = frame.shape[:2]
+        for zone in zones:
+            inside = [p["bbox"] for p in people if p["confidence"] >= PERSON_CONF
+                      and in_polygon((p["bbox"][0] + p["bbox"][2]) / 2 / w, p["bbox"][3] / h, zone["polygon"])]
+            if not inside:
+                continue
+            stay = self.stay_alert(zone["id"], now, float(zone.get("dwell_seconds") or 900))
+            if not zone.get("alerts_enabled", True):
+                continue
+            n = len(inside)
+            who = f"{n} {'person' if n == 1 else 'people'}"
+            message = (f"{who} came into {zone['name']}" if stay["repeat"] == 0
+                       else f"{who} still in {zone['name']} after {format_duration(now - stay['start'])}")
+            aid = alerts.raise_alert(
+                "Loitering Detected", zone.get("severity") or "Medium", camera_id, message=message,
+                dedupe_key=stay["key"], snapshot_jpeg=_annotate(frame, zone, inside), now=now,
+                zone_id=zone["id"], zone_name=zone["name"],
+                on_created=lambda aid: evidence.service.schedule(aid, camera_id, now),
+            )
+            self.name_people(aid, camera_id, inside, w, h, now)
+
+    def name_people(self, alert_id: int, camera_id: int, boxes: list, w: int, h: int, now: float, identify=None) -> None:
+        """Names the people INSIDE the zone (their boxes), never anyone else in view: face
+        recognition's live identity at each box (visitors.VisitorService.identify). Named employees
+        are stored on the alert (alerts.employee_id, comma separated), so it says who came in."""
+        if not alert_id or not boxes or now - self._name_tried.get(alert_id, 0) < NAME_EVERY_SECONDS:
+            return
+        self._name_tried[alert_id] = now
+        if identify is None:
+            from app import visitors
+            identify = visitors.service.identify
+        named = self._named.setdefault(alert_id, set())
+        new = {e for e in (identify(camera_id, b, w, h) for b in boxes) if e} - named
+        if not new:
+            return
+        named |= new
+        with _conn() as conn:
+            conn.execute("UPDATE alerts SET employee_id = ? WHERE id = ?", (",".join(sorted(named)), alert_id))
+        if len(self._named) > 500:                      # only recent alerts are still being named
+            for old in sorted(self._named)[:-200]:
+                self._named.pop(old, None)
+                self._name_tried.pop(old, None)
+
+    def stay_alert(self, zone_id: int, now: float, every: float) -> dict:
+        """The current stay in an alert-on-entry zone: a new stay (repeat 0) when the zone was empty
+        for NEW_ALERT_AFTER_SECONDS, and a new alert key every `every` seconds while it lasts."""
+        st = self._stays.get(zone_id)
+        if st is None or now - st["last"] > NEW_ALERT_AFTER_SECONDS:
+            st = {"start": now, "last": now, "repeat": 0, "alert_at": now}
+        elif now - st["alert_at"] >= every:
+            st = {**st, "repeat": st["repeat"] + 1, "alert_at": now}
+        st["last"] = now
+        st["key"] = f"loiter:{zone_id}:{int(st['start'])}:{st['repeat']}"
+        self._stays[zone_id] = st
+        return st
 
     def _loiter_inner(self, camera_id: int, frame: np.ndarray, zones: list[dict], now: float, people: list) -> None:
         """Loitering zones: a tracked person who stays inside one for its duration raises ONE alert
         per continuous stay (see loitering.py for the lifecycle). Uses the same people the shared
         detector already delivered, so there is no extra inference."""
+        on_entry = [z for z in zones if z.get("zone_type") == "loitering" and z.get("alert_on_entry")]
+        if on_entry:
+            self._loiter_on_entry(camera_id, frame, on_entry, now, people)
+        zones = [z for z in zones if not z.get("alert_on_entry")]
         active = {z["id"]: z for z in zones if z.get("zone_type") == "loitering"}
-        known = {z["id"]: z for z in self._zones.get(camera_id, []) if z["zone_type"] == "loitering"}
+        known = {z["id"]: z for z in self._zones.get(camera_id, []) if z["zone_type"] == "loitering" and not z.get("alert_on_entry")}
         known.update(active)
         if not known:
             return

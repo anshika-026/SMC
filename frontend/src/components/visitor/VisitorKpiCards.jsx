@@ -1,18 +1,35 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import InsightCard from "../workforce/InsightCard";
 import * as api from "../../api/client";
+import { setVisibleInterval, clearVisibleInterval } from "../../lib/visibleInterval";
+import { fmtTime } from "../VisitorAlerts";
+import { fmtDuration } from "../VisitorHistory";
 import { shiftIso, todayIso } from "../workforce/shared";
 
 // The three Visitor Management KPI cards, in the Attendance card style
 // (InsightCard: arrows / swipe page through a card's views, a click opens the
-// detailed view of the view shown):
-//   Visitor Activity   today's visitors       -> the visitor records, filtered
-//   Visitor Trends     visits over time       -> Analytics
-//   Footfall Analytics people entering gates  -> the Footfall view
-// Visitor numbers: /visitor-records/kpis and the last 30 days of visits.
-// Footfall numbers: /footfall/day (today) and /footfall/history (30 days).
+// detailed view of the view shown). Their numbers are what the cameras saw in
+// the visitor area, the same data as the "People in visitor area" tab (one row
+// per visit, visitors numbered #1, #2, ...; sittings that were an employee's are
+// not visitors), except Footfall:
+//   Visitor Activity              is a visitor there now, visitors today, returning
+//   Visitor Trends                visits per day, average stay, most frequent
+//   Footfall Analytics            people entering gates (/footfall/day, /footfall/history)
+// The first view of each card is the one to see without paging.
+// onOpen("visitor") opens People in visitor area filtered; onFootfall the Footfall view.
 
 const DAYS = 30;
+const REFRESH_MS = 15_000;
+
+function dayOf(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+const label = (r) => (r.visitor_number ? `Visitor #${r.visitor_number}` : "Visitor");
+const personKey = (r) => (r.visitor_number ? `n${r.visitor_number}` : r.visit);
+const plural = (x, one, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
+const hhmm = (ts) => fmtTime(ts).slice(0, 5);
 
 function hourLabel(h) {
   if (h === null || h === undefined) return "—";
@@ -20,38 +37,63 @@ function hourLabel(h) {
   return `${h12}${h < 12 ? "am" : "pm"}`;
 }
 
-export default function VisitorKpiCards({ k, onFilter, onAnalytics, onFootfall, refreshKey }) {
+export default function VisitorKpiCards({ onOpen, onFootfall, refreshKey }) {
   const [period, setPeriod] = useState({ activity: "week", trends: "month", footfall: "week" });
-  const [rows, setRows] = useState([]);
+  const [visits, setVisits] = useState(null);
   const [ffDays, setFfDays] = useState([]);
   const [ffToday, setFfToday] = useState(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     const today = todayIso();
-    api.vr
-      .visits({ from: shiftIso(today, -(DAYS - 1)), to: today, limit: 5000 })
-      .then((d) => setRows(d.visits))
-      .catch(() => setRows([]));
+    api.getVisitorVisits({ limit: 2000, start: shiftIso(today, -(DAYS - 1)), end: today })
+      .then((d) => setVisits(d.visits || []))
+      .catch(() => setVisits([]));
     api.getFootfallHistory(shiftIso(today, -(DAYS - 1)), today).then((d) => setFfDays(d.days)).catch(() => setFfDays([]));
     api.getFootfallDay(today).then(setFfToday).catch(() => setFfToday(null));
-  }, [k, refreshKey]);
+  }, []);
 
-  const span = (p) => (p === "month" ? DAYS : 7);
-  // Daily values of fn(visits of that day) for the last 7 / 30 days.
-  const series = (fn, p) => {
-    const days = span(p);
-    const today = todayIso();
+  useEffect(() => {
+    load();
+    const h = setVisibleInterval(load, REFRESH_MS);
+    return () => clearVisibleInterval(h);
+  }, [load, refreshKey]);
+
+  const ready = visits !== null;
+  const today = todayIso();
+  const v = visits || [];
+  const vToday = v.filter((r) => dayOf(r.arrived_at) === today);
+  const n = (x) => (ready ? x : null);
+
+  // Daily values of fn(rows of that day) for the last 7 / 30 days.
+  const series = (list, fn, p) => {
+    const days = p === "month" ? DAYS : 7;
     return Array.from({ length: days }, (_, i) => {
       const day = shiftIso(today, i - days + 1);
-      return { day, v: fn(rows.filter((r) => r.visit_date === day)) };
+      return { day, v: fn(list.filter((r) => dayOf(r.arrived_at) === day)) };
     });
   };
-  const ffSeries = (key, p) => ffDays.slice(-span(p)).map((d) => ({ day: d.day, v: d[key] }));
-  const count = (test) => (list) => list.filter(test).length;
-  const visitors = (test = () => true) => (list) => new Set(list.filter(test).map((r) => r.visitor_id)).size;
-  const n = (x) => (k ? x : null);
-  const plural = (x, one, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
+  const people = (list) => new Set(list.map(personKey)).size;
+  // A visitor who came before today: visits in all > their visits today.
+  const returningOf = (list) => {
+    const seen = new Map();
+    list.forEach((r) => r.visitor_number && seen.set(r.visitor_number, (seen.get(r.visitor_number) || 0) + 1));
+    return [...seen.entries()].filter(([num, k]) => (list.find((r) => r.visitor_number === num)?.visitor_visits || 0) > k).length;
+  };
+  const avgMin = (list) => (list.length ? Math.round(list.reduce((a, r) => a + r.duration_seconds, 0) / list.length / 60) : 0);
+
+  const visitorsNow = vToday.filter((r) => r.status === "inside");
+  const visitorsToday = people(vToday);
+  const returningToday = returningOf(vToday);
+  const avgToday = vToday.length ? vToday.reduce((a, r) => a + r.duration_seconds, 0) / vToday.length : 0;
+  const longest = vToday.reduce((a, r) => (!a || r.duration_seconds > a.duration_seconds ? r : a), null);
+  const monthVisits = v.length;
+  const frequent = (() => {
+    const c = new Map();
+    v.forEach((r) => r.visitor_number && c.set(r.visitor_number, (c.get(r.visitor_number) || 0) + 1));
+    return [...c.entries()].filter(([, k]) => k > 1).sort((a, b) => b[1] - a[1]);
+  })();
   const ff = ffToday;
+  const ffSeries = (key, p) => ffDays.slice(-(p === "month" ? DAYS : 7)).map((d) => ({ day: d.day, v: d[key] }));
   const peakCount = ff && ff.peak_hour != null ? ff.hourly.find((h) => h.hour === ff.peak_hour)?.entries ?? 0 : 0;
   const week = ffDays.slice(-7).reduce((a, d) => a + d.entries, 0);
 
@@ -64,39 +106,35 @@ export default function VisitorKpiCards({ k, onFilter, onAnalytics, onFootfall, 
         onPeriod={(p) => setPeriod((x) => ({ ...x, activity: p }))}
         metrics={[
           {
-            key: "visitors",
+            key: "now",
+            label: "Visitor in visitor area now",
+            value: n(visitorsNow.length),
+            display: ready ? (visitorsNow.length ? `Yes · ${visitorsNow.length}` : "No") : null,
+            total: Math.max(visitorsToday, 1),
+            people: ready ? visitorsNow.map((r) => ({ name: `${label(r)} · since ${hhmm(r.arrived_at)}`, warn: true })) : undefined,
+            insight: ready
+              ? visitorsNow.length ? `${plural(visitorsNow.length, "visitor")} waiting in the visitor area right now.` : "No visitor in the visitor area right now."
+              : "Loading…",
+            onOpen: () => onOpen("visitor"),
+          },
+          {
+            key: "today",
             label: "Visitors today",
-            value: n(k?.visitors_today),
-            series: series(visitors(), period.activity),
+            value: n(visitorsToday),
+            series: series(v, people, period.activity),
             better: "up",
-            insight: k ? `${plural(k.visitors_today, "visitor")} registered for today; ${k.inside_now} inside now.` : "Loading…",
-            onOpen: () => onFilter({ preset: "today" }),
+            insight: ready
+              ? visitorsToday ? `${visitorsToday - returningToday} new, ${returningToday} came before · ${plural(vToday.length, "visit")} today.` : "No visitors today yet."
+              : "Loading…",
+            onOpen: () => onOpen("visitor"),
           },
           {
-            key: "first",
-            label: "First-time visitors",
-            value: n(k?.first_time_today),
-            series: series(visitors((r) => r.first_visit), period.activity),
-            insight: k ? `${plural(k.first_time_today, "visitor")} came for the first time today.` : "Loading…",
-            onOpen: () => onFilter({ preset: "today", type: "first" }),
-          },
-          {
-            key: "repeat",
-            label: "Repeat visitors",
-            value: n(k?.repeat_today),
-            series: series(visitors((r) => !r.first_visit), period.activity),
-            insight: k ? `${plural(k.repeat_today, "visitor")} had visited before.` : "Loading…",
-            onOpen: () => onFilter({ preset: "today", type: "repeat" }),
-          },
-          {
-            key: "pending",
-            label: "Expected, not checked in",
-            value: n(k?.pending_today),
-            series: series(count((r) => r.status === "pending"), period.activity),
-            better: "down",
-            people: k ? (k.pending_names || []).map((name) => ({ name })) : undefined,
-            insight: k ? (k.pending_today ? `${plural(k.pending_today, "registered visitor")} not checked in yet.` : "Everyone registered today has checked in.") : "Loading…",
-            onOpen: () => onFilter({ preset: "today", status: "pending" }),
+            key: "returning",
+            label: "Returning visitors today",
+            value: n(returningToday),
+            series: series(v, returningOf, period.activity),
+            insight: ready ? `${plural(returningToday, "visitor")} today had visited before.` : "Loading…",
+            onOpen: () => onOpen("visitor"),
           },
         ]}
       />
@@ -107,30 +145,33 @@ export default function VisitorKpiCards({ k, onFilter, onAnalytics, onFootfall, 
         onPeriod={(p) => setPeriod((x) => ({ ...x, trends: p }))}
         metrics={[
           {
-            key: "month",
-            label: "Visits this month",
-            value: n(k?.visits_this_month),
-            series: series((list) => list.length, period.trends),
+            key: "visits",
+            label: `Visits, last ${DAYS} days`,
+            value: n(monthVisits),
+            series: series(v, (list) => list.length, period.trends),
             better: "up",
-            insight: k ? `${plural(k.visits_this_month, "visit")} so far this month. Open for daily, weekly and monthly reports.` : "Loading…",
-            onOpen: onAnalytics,
+            insight: ready ? `${plural(monthVisits, "visit")} by ${plural(people(v), "visitor")} in the last ${DAYS} days.` : "Loading…",
+            onOpen: () => onOpen("visitor"),
           },
           {
-            key: "repeat_month",
-            label: "Repeat visits this month",
-            value: n(k?.repeat_visits_this_month),
-            series: series(count((r) => !r.first_visit), period.trends),
-            insight: k ? `${plural(k.repeat_visits_this_month, "visit")} by people who had visited before.` : "Loading…",
-            onOpen: onAnalytics,
+            key: "stay",
+            label: "Average visitor stay today",
+            value: n(Math.round(avgToday / 60)),
+            display: ready ? (vToday.length ? fmtDuration(avgToday) : "—") : null,
+            series: series(v, avgMin, period.trends),
+            insight: ready
+              ? longest ? `Longest today: ${label(longest)}, ${fmtDuration(longest.duration_seconds)}. Chart: average minutes per day.` : "No visits today yet."
+              : "Loading…",
+            onOpen: () => onOpen("visitor"),
           },
           {
             key: "frequent",
             label: "Most frequent visitors",
-            value: n(k?.most_frequent?.length),
-            total: Math.max(k?.most_frequent?.length || 0, 1),
-            people: k ? k.most_frequent.map((f) => ({ name: `${f.name} · ${f.visits}`, hint: `${f.visits} visits this month` })) : undefined,
-            insight: k ? (k.most_frequent.length ? "Visitors with more than one visit this month." : "No repeat visitors this month yet.") : "Loading…",
-            onOpen: onAnalytics,
+            value: n(frequent.length),
+            total: Math.max(people(v), 1),
+            people: ready ? frequent.map(([num, k]) => ({ name: `Visitor #${num} · ${k}`, hint: `${k} visits in the last ${DAYS} days` })) : undefined,
+            insight: ready ? (frequent.length ? `Visitors with more than one visit in the last ${DAYS} days.` : `No repeat visitors in the last ${DAYS} days.`) : "Loading…",
+            onOpen: () => onOpen("visitor"),
           },
         ]}
       />
@@ -142,19 +183,19 @@ export default function VisitorKpiCards({ k, onFilter, onAnalytics, onFootfall, 
         metrics={[
           {
             key: "ff_entries",
-            label: "People entering today",
+            label: "People today",
             value: ff ? ff.entries : null,
             series: ffSeries("entries", period.footfall),
             better: "up",
-            insight: ff ? `${plural(ff.entries, "person", "people")} counted at the gates today (${week} this week).` : "Loading…",
+            insight: ff ? `${plural(ff.entries, "person", "people")} came today, each counted once (${week} person-days this week).` : "Loading…",
             onOpen: onFootfall,
           },
           {
             key: "ff_exits",
-            label: "Exits today",
+            label: "Left today",
             value: ff ? ff.exits : null,
-            series: ffSeries("exits", period.footfall),
-            insight: ff ? (ff.gates_without_entry_line ? "Exits are counted only at gates with an entry line." : `${plural(ff.exits, "exit")} through the gates today.`) : "Loading…",
+            total: Math.max(ff?.entries || 0, 1),
+            insight: ff ? `${plural(ff.exits, "person", "people")} of ${ff.entries} have left; ${ff.entries - ff.exits} still on site.` : "Loading…",
             onOpen: onFootfall,
           },
           {
@@ -168,11 +209,11 @@ export default function VisitorKpiCards({ k, onFilter, onAnalytics, onFootfall, 
           },
           {
             key: "ff_split",
-            label: "Employees / others",
+            label: "Employees / visitors",
             value: ff ? ff.visitor_entries : null,
             display: ff ? `${ff.employee_entries} / ${ff.visitor_entries}` : null,
             total: Math.max(ff?.entries || 0, 1),
-            insight: ff ? "Employees are those named by face at the gate; everyone else counts as others." : "Loading…",
+            insight: ff ? "Employees recognised by face on any camera / visitors (Visitor #n)." : "Loading…",
             onOpen: onFootfall,
           },
         ]}

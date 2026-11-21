@@ -369,6 +369,13 @@ def test_kpis_count_visits_not_alerts_and_never_employees(world, monkeypatch):
     world.now = now - 70 * MIN
     world.identity[500] = "EMP-1"
     world.run(65 * MIN, {1: 100, 2: 500})          # a visitor (3 alerts) and an employee, 65 min
+    # The visitor's face matched nobody: without it, a sitting while an employee sat there is
+    # taken to be that employee's (visitors.mark_employee_sittings).
+    from app import face_db
+    face_db.init_face_tables()
+    with visitors._conn() as conn:
+        conn.execute("INSERT INTO face_training_captures (camera_id, track_id, captured_at, image_path, auto_tier, embedding) "
+                     "VALUES (1, 1, ?, 'x.jpg', 'unknown', '[1.0, 0.0]')", (now - 60 * MIN,))
     k = visitors.kpis(now=now)
     assert k["visitors_today"] == 1                 # one visit, however many alerts
     assert k["long_stays"] == 1 and k["waiting_now"] == 1

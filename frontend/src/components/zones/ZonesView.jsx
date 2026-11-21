@@ -245,7 +245,7 @@ function IntrusionActivity({ zone }) {
             <tr>
               <th>Detected</th>
               <th>Event</th>
-              <th>Duration</th>
+              <th>Person</th>
               <th>Status</th>
               <th>Clip</th>
             </tr>
@@ -255,7 +255,7 @@ function IntrusionActivity({ zone }) {
               <tr key={r.id}>
                 <td>{new Date(r.ts * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
                 <td>{r.event === "Loitering Detected" ? "Loitering" : "Intrusion"}</td>
-                <td>{Math.round(r.duration_seconds)} s</td>
+                <td>{r.who}</td>
                 <td>{r.status}</td>
                 <td>{r.has_clip ? <button type="button" className="text-brand-600 text-xs" onClick={() => setPlaying(r)}>Play</button> : <span className="text-slate-400 text-xs">{r.clip_status || "-"}</span>}</td>
               </tr>

@@ -701,7 +701,7 @@ class FootfallService:
                 "FROM reid_events e JOIN reid_persons p ON p.id = e.person_id "
                 "WHERE e.ts >= ? GROUP BY e.person_id ORDER BY MAX(e.ts) DESC LIMIT 200", (day_start,),
             ).fetchall()
-            # Newest picture still within its 24 h lifetime, per person.
+            # Newest picture still within its 48 h lifetime, per person.
             from app import retention
 
             picture_cutoff = now - retention.FOOTFALL_PICTURE_HOURS * 3600 if retention.FOOTFALL_PICTURE_HOURS > 0 else 0
@@ -779,7 +779,7 @@ class FootfallService:
                     "first_seen": first,
                     "last_seen": last,
                     "gates": [names.get(int(cid), f"Camera {cid}") for cid in (cams or "").split(",") if cid],
-                    "snapshot_id": pictures.get(pid),  # None once the picture's 24 h are up
+                    "snapshot_id": pictures.get(pid),  # None once the picture's 48 h are up
                     **identity(pid),   # name ("Person" unless recognised as an employee), clip
                 }
                 for label, first, last, cams, pid in visitors

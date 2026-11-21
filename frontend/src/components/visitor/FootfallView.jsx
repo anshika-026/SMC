@@ -6,7 +6,6 @@ import Modal from "../Modal";
 import LiveCameraTile from "../LiveCameraTile";
 import CameraViewerModal from "../CameraViewerModal";
 import FootfallAddCamera from "../FootfallAddCamera";
-import Footfall from "../../pages/Footfall";
 import * as api from "../../api/client";
 import { shiftIso, todayIso } from "../workforce/shared";
 
@@ -47,9 +46,10 @@ function group(days, period) {
       key = d.day.slice(0, 7);
       label = dt.toLocaleDateString([], { month: "short", year: "2-digit" });
     }
-    const g = out.get(key) || { label, entries: 0, exits: 0, employee_entries: 0 };
+    const g = out.get(key) || { label, entries: 0, exits: 0, employee_entries: 0, visitor_entries: 0 };
     g.entries += d.entries;
     g.exits += d.exits;
+    g.visitor_entries += d.entries - d.employee_entries;
     g.employee_entries += d.employee_entries;
     out.set(key, g);
   }
@@ -99,8 +99,9 @@ export default function FootfallView() {
     if (!history) return null;
     const entries = history.reduce((a, d) => a + d.entries, 0);
     const exits = history.reduce((a, d) => a + d.exits, 0);
+    const employees = history.reduce((a, d) => a + d.employee_entries, 0);
     const busiest = history.reduce((b, d) => (d.entries > (b?.entries ?? -1) ? d : b), null);
-    return { entries, exits, avg: history.length ? Math.round(entries / history.length) : 0, busiest };
+    return { entries, exits, employees, avg: history.length ? Math.round(entries / history.length) : 0, busiest };
   }, [history]);
 
   const hourly = useMemo(() => {
@@ -141,7 +142,7 @@ export default function FootfallView() {
         </span>
         <div className="mr-auto">
           <h3 className="text-sm font-semibold text-ink-900">Footfall</h3>
-          <p className="text-xs text-slate-500">People entering through the counting gates, each person once a day.</p>
+          <p className="text-xs text-slate-500">People who came each day, each person counted once: employees recognised on any camera and visitors.</p>
         </div>
         {feature !== null && (
           <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
@@ -168,8 +169,8 @@ export default function FootfallView() {
           <input type="date" className="input-field !w-auto !py-1.5 text-xs" value={to} min={from} max={todayIso()} onChange={(e) => { setRange(""); setTo(e.target.value); }} />
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <Tile label="People counted" value={totals?.entries} sub="entries in the range" />
-          <Tile label="Exits" value={totals?.exits} sub="gates with an entry line only" />
+          <Tile label="People counted" value={totals?.entries} sub="each person once a day" />
+          <Tile label="Employees / visitors" value={totals ? `${totals.employees} / ${totals.entries - totals.employees}` : null} sub="employee days / visitor days" />
           <Tile label="Average per day" value={totals?.avg} />
           <Tile label="Busiest day" value={totals?.busiest?.entries ? totals.busiest.entries : "—"}
             sub={totals?.busiest?.entries ? new Date(`${totals.busiest.day}T12:00:00`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" }) : "no entries"} />
@@ -191,8 +192,8 @@ export default function FootfallView() {
                 <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} width={28} />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} cursor={{ fill: "#f8fafc" }} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="entries" name="Entries" fill="var(--color-brand-500)" radius={[4, 4, 0, 0]} maxBarSize={30} />
-                <Bar dataKey="exits" name="Exits" fill="#cbd5e1" radius={[4, 4, 0, 0]} maxBarSize={30} />
+                <Bar dataKey="employee_entries" name="Employees" stackId="p" fill="var(--color-brand-500)" maxBarSize={30} />
+                <Bar dataKey="visitor_entries" name="Visitors" stackId="p" fill="#fbbf24" radius={[4, 4, 0, 0]} maxBarSize={30} />
               </BarChart>
             </ResponsiveContainer>
           ) : (
@@ -209,8 +210,8 @@ export default function FootfallView() {
         </div>
         {dayStats && (
           <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-600">
-            <span><b className="text-ink-900 text-base font-semibold">{dayStats.entries}</b> entries</span>
-            <span><b className="text-ink-900 text-base font-semibold">{dayStats.exits}</b> exits</span>
+            <span><b className="text-ink-900 text-base font-semibold">{dayStats.entries}</b> people</span>
+            <span><b className="text-ink-900 text-base font-semibold">{dayStats.exits}</b> left</span>
             <span>Peak: <b className="text-ink-900">{dayStats.peak_hour == null ? "—" : `${hourLabel(dayStats.peak_hour)}–${hourLabel((dayStats.peak_hour + 1) % 24)}`}</b></span>
             <span>{dayStats.employee_entries} employees · {dayStats.visitor_entries} others</span>
           </div>
@@ -282,8 +283,7 @@ export default function FootfallView() {
 
       {/* C. Today: counts, people and their clips (the Footfall screen) */}
       <section className="space-y-2">
-        <h3 className="text-sm font-semibold text-ink-900">Today</h3>
-        <Footfall embedded reloadKey={tick} />
+        <FootfallPeople reloadKey={tick} />
       </section>
 
       <FootfallAddCamera
@@ -303,6 +303,62 @@ export default function FootfallView() {
         </div>
       </Modal>
       {viewing && <CameraViewerModal camera={viewing} overlay={false} onClose={() => setViewing(null)} />}
+    </div>
+  );
+}
+
+// The people counted on one day: one row per person (employees by face on any camera,
+// visitors by their number), first and last sighting, the cameras that saw them.
+function FootfallPeople({ reloadKey }) {
+  const [date, setDate] = useState(todayIso());
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [show, setShow] = useState("all");
+  useEffect(() => {
+    setData(null);
+    api.getFootfallSitePeople(date).then((d) => { setData(d.people); setError(""); }).catch((e) => setError(e.message));
+  }, [date, reloadKey]);
+  const time = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const rows = (data || []).filter((p) => show === "all" || p.kind === show);
+  const count = (k) => (data || []).filter((p) => k === "all" || p.kind === k).length;
+  return (
+    <div className="bg-white rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.05)] p-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-sm font-semibold text-ink-900 mr-auto">People counted</h3>
+        <div className="inline-flex rounded-full bg-slate-100 p-0.5">
+          {[["all", "All"], ["employee", "Employees"], ["visitor", "Visitors"]].map(([k, label]) => (
+            <button key={k} type="button" onClick={() => setShow(k)}
+              className={`px-3 py-1 rounded-full text-xs font-medium ${show === k ? "bg-white text-ink-900 shadow-sm" : "text-slate-500 hover:text-ink-900"}`}>
+              {label}{data ? ` (${count(k)})` : ""}
+            </button>
+          ))}
+        </div>
+        <input type="date" className="input-field !w-auto !py-1.5 text-xs" value={date} max={todayIso()} onChange={(e) => e.target.value && setDate(e.target.value)} />
+      </div>
+      {error && <p className="text-sm text-danger-500">{error}</p>}
+      {!data && !error && <p className="text-sm text-slate-400 py-6 text-center">Loading…</p>}
+      {data && rows.length === 0 && <p className="text-sm text-slate-400 py-6 text-center">Nobody counted on this day.</p>}
+      {rows.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="data-table">
+            <thead>
+              <tr><th>Type</th><th>Who</th><th>Arrived</th><th>Last seen</th><th>Cameras</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((p) => (
+                <tr key={p.key}>
+                  <td><span className={`badge ${p.kind === "employee" ? "badge-success" : "badge-warning"}`}>{p.kind === "employee" ? "Employee" : "Visitor"}</span></td>
+                  <td className="font-medium text-ink-900">{p.name}</td>
+                  <td>{time(p.first_seen)}</td>
+                  <td>{time(p.last_seen)}</td>
+                  <td className="text-xs text-slate-500">{p.camera_names.join(", ")}</td>
+                  <td><span className={`badge ${p.left ? "badge-neutral" : "badge-success"}`}>{p.left ? "Left" : "On site"}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

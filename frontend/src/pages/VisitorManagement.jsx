@@ -5,6 +5,7 @@ import SidePanel from "../components/SidePanel";
 import VisitorAlerts, { fmtTime } from "../components/VisitorAlerts";
 import VisitorEventDetail from "../components/VisitorEventDetail";
 import VisitorHistory from "../components/VisitorHistory";
+import PeopleInVisitorArea from "../components/PeopleInVisitorArea";
 import VisitorEmployees from "../components/VisitorEmployees";
 import Tabs from "../components/Tabs";
 import RegisterVisitorModal from "../components/visitor/RegisterVisitorModal";
@@ -22,8 +23,8 @@ import { shiftIso, todayIso } from "../components/workforce/shared";
 import * as api from "../api/client";
 import { setVisibleInterval, clearVisibleInterval } from "../lib/visibleInterval";
 
-// Visitor Management: three KPI cards (Visitor Activity, Visitor Trends,
-// Footfall Analytics; each opens its detailed view) over five sections:
+// Visitor Management: three KPI cards (Visitor Activity and Visitor Trends from the
+// visitor area cameras, Footfall Analytics; each opens its detailed view) over the sections:
 //   Visitor records   every visit: who, why, whom they met, in / out, waiting,
 //                     duration (visitor_registry.py). Camera arrivals the
 //                     operator can link to a visit open from here.
@@ -39,10 +40,12 @@ const EVENTS_MS = 4_000;
 const RECORDS_MS = 20_000;
 const TOAST_MS = 8_000;
 const HIGHLIGHT_MS = 8_000;
-// "Employees in visitor area" restores the employee list the old Area
-// monitoring -> Employees tab showed (kept apart from visitor records).
-const TABS = ["Visitor records", "Employees in visitor area", "Visitor profiles", "Analytics", "Footfall", "Zones & areas"];
-const TAB_PARAM = { records: "Visitor records", employees: "Employees in visitor area", profiles: "Visitor profiles", analytics: "Analytics", footfall: "Footfall", zones: "Zones & areas" };
+// "People in visitor area": everyone who sat in a visitor area, visitors (with their clip) and
+// employees (with face snapshots) in one list, filterable to either. It replaced the
+// employees-only "Employees in visitor area" tab.
+const PEOPLE_TAB = "People in visitor area";
+const TABS = ["Visitor records", PEOPLE_TAB, "Visitor profiles", "Analytics", "Footfall", "Zones & areas"];
+const TAB_PARAM = { records: "Visitor records", people: PEOPLE_TAB, employees: PEOPLE_TAB, profiles: "Visitor profiles", analytics: "Analytics", footfall: "Footfall", zones: "Zones & areas" };
 const NO_FILTERS = { status: "", type: "", host: "", department: "", q: "" };
 
 // KPI card presets -> the records table's date range.
@@ -60,6 +63,7 @@ function initialTab() {
   if (q && TAB_PARAM[q]) return TAB_PARAM[q];
   try {
     const t = window.localStorage.getItem("visitorTab");
+    if (t === "Employees in visitor area") return PEOPLE_TAB; // the tab's old name
     return TABS.includes(t) ? t : TABS[0];
   } catch {
     return TABS[0];
@@ -78,7 +82,6 @@ export default function VisitorManagement() {
 
   // Visitor records
   const [vrSettings, setVrSettings] = useState(null);
-  const [vrKpis, setVrKpis] = useState(null);
   const [filters, setFilters] = useState(() => ({ ...presetRange("week"), ...NO_FILTERS }));
   const [records, setRecords] = useState(null);
   const [recordsError, setRecordsError] = useState("");
@@ -101,7 +104,6 @@ export default function VisitorManagement() {
   }
 
   const loadRecords = useCallback(() => {
-    api.vr.kpis().then(setVrKpis).catch(() => {});
     api.vr
       .visits({ ...apiFilters(filters), limit: 1000 })
       .then((d) => {
@@ -126,10 +128,11 @@ export default function VisitorManagement() {
 
   const changed = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  function applyKpiFilter({ preset, ...rest }) {
-    setFilters({ ...presetRange(preset), ...NO_FILTERS, ...rest });
-    pickTab("Visitor records");
-    setTimeout(() => document.getElementById("visitor-records")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  // A KPI card opens "People in visitor area", showing visitors or employees.
+  const [peopleShow, setPeopleShow] = useState({ show: "all", n: 0 });
+  function openPeople(show) {
+    setPeopleShow((x) => ({ show, n: x.n + 1 }));
+    pickTab(PEOPLE_TAB);
   }
 
   // Visitor seating-area alerts: polled on every tab so their pop-ups always show.
@@ -252,13 +255,7 @@ export default function VisitorManagement() {
         }
       />
 
-      <VisitorKpiCards
-        k={vrKpis}
-        onFilter={applyKpiFilter}
-        onAnalytics={() => pickTab("Analytics")}
-        onFootfall={() => pickTab("Footfall")}
-        refreshKey={refreshKey}
-      />
+      <VisitorKpiCards onOpen={openPeople} onFootfall={() => pickTab("Footfall")} refreshKey={refreshKey} />
 
       <div className="overflow-x-auto">
         <Tabs tabs={TABS} active={tab} onChange={pickTab} />
@@ -281,7 +278,7 @@ export default function VisitorManagement() {
           />
         </div>
       )}
-      {tab === "Employees in visitor area" && <VisitorEmployees />}
+      {tab === PEOPLE_TAB && <PeopleInVisitorArea key={peopleShow.n} initialShow={peopleShow.show} cameras={vcams} onOpenEvent={setOpenEvent} />}
       {tab === "Visitor profiles" && <VisitorDirectory onOpenVisitor={setVisitorId} refreshKey={refreshKey} />}
       {tab === "Analytics" && <VisitorAnalytics onOpenVisitor={setVisitorId} />}
       {tab === "Footfall" && <FootfallView />}

@@ -40,7 +40,7 @@ def wf(isolated_db, monkeypatch):
 
 def seen(emp, day, first, last):
     with attendance._conn() as conn:
-        conn.execute("INSERT INTO attendance_days (employee_id, day, first_seen, last_seen, sightings) VALUES (?, ?, ?, ?, 2)",
+        conn.execute("INSERT INTO attendance_days (employee_id, day, first_seen, last_seen, sightings) VALUES (?, ?, ?, ?, 10)",
                      (emp, day, first, last))
 
 
@@ -253,7 +253,7 @@ def test_seen_at_the_gate_after_inside_is_likely_outside(gate_cam):
     now = at(today, 14, 43)
     seen("E1", today, at(today, 10, 51), at(today, 14, 42))
     recognised("E1", INSIDE_CAM, at(today, 11, 0), at(today, 12, 58))   # last inside 12:58
-    recognised("E1", GATE_CAM, at(today, 13, 19), at(today, 14, 42))    # at the gate since
+    recognised("E1", GATE_CAM, at(today, 13, 19), at(today, 13, 20))    # at the gate, then nowhere since
     r = day_of("E1", today, now)
     assert r["location"] == "likely_outside" and r["outside_now"] and not r["inside_now"] and not r["outside_confirmed"]
     assert "12:58" in r["location_detail"] and r["missing_exit"]
@@ -275,7 +275,7 @@ def test_only_ever_at_the_gate_is_not_called_outside(gate_cam):
     today = "2026-10-30"
     now = at(today, 14, 43)
     seen("E1", today, at(today, 14, 0), at(today, 14, 40))
-    recognised("E1", GATE_CAM, at(today, 14, 0), at(today, 14, 40))
+    recognised("E1", GATE_CAM, at(today, 14, 0), at(today, 14, 5))      # at the gate, then nowhere since
     r = day_of("E1", today, now)
     assert r["location"] == "at_gate" and not r["outside_now"] and not r["inside_now"]
 
@@ -289,10 +289,41 @@ def test_confirmed_exit_then_seen_inside_again_is_inside(gate_cam):
     assert r["location"] == "inside" and not r["outside_now"]
 
 
-def test_nobody_seen_recently_is_unknown(gate_cam):
+def test_not_seen_for_longer_than_inside_keep_minutes_is_outside(gate_cam):
     today = "2026-10-30"
     now = at(today, 16, 0)
     seen("E1", today, at(today, 9, 0), at(today, 12, 0))
     recognised("E1", INSIDE_CAM, at(today, 9, 0), at(today, 12, 0))
     r = day_of("E1", today, now)
-    assert r["location"] == "unknown" and "12:00" in r["location_detail"] and not r["inside_now"]
+    assert r["location"] == "likely_outside" and "12:00" in r["location_detail"] and not r["inside_now"] and r["outside_now"]
+
+
+def test_one_or_two_sightings_are_not_a_presence(api, admin_token, isolated_db, monkeypatch):
+    """A single frame of someone else's face matched by mistake must not mark an employee present."""
+    from app import attendance
+
+    assert not attendance.confirmed({"sightings": 1}) and not attendance.confirmed({"sightings": 2})
+    assert attendance.confirmed({"sightings": attendance.MIN_SIGHTINGS}) and not attendance.confirmed(None)
+
+
+def test_seen_at_reception_recently_is_inside():
+    """The gate camera also sees the reception seating: recognised there recently = inside, not
+    'likely outside'; last seen at the gate and then nowhere for longer = likely outside."""
+    gate = {1}
+    names = {1: "CAM1", 2: "CAM2"}
+    now = 10_000.0
+    s = [{"camera_id": 2, "first_seen": now - 3000, "last_seen": now - 2000},
+         {"camera_id": 1, "first_seen": now - 70, "last_seen": now - 60}]
+    loc = workforce._location(now, [], None, s, gate, names)
+    assert loc["location"] == "inside" and "reception" in loc["location_detail"]
+    later = now + (workforce.GATE_KEEP_MINUTES + 1) * 60
+    assert workforce._location(later, [], None, s, gate, names)["location"] == "likely_outside"
+
+
+def test_last_seen_in_the_hall_counts_as_inside_for_inside_keep_minutes():
+    """Recognised now and then in the hall: inside for INSIDE_KEEP_MINUTES, then 'not seen since'."""
+    now = 100_000.0
+    s = [{"camera_id": 2, "first_seen": now - 1300, "last_seen": now - 1200}]     # 20 min ago in the hall
+    assert workforce._location(now, [], None, s, {1}, {2: "CAM2"})["location"] == "inside"
+    later = now + workforce.INSIDE_KEEP_MINUTES * 60
+    assert workforce._location(later, [], None, s, {1}, {2: "CAM2"})["location"] == "likely_outside"

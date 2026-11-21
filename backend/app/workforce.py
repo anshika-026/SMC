@@ -695,6 +695,17 @@ def _gate_cameras() -> set[int]:
 # sighting the newer evidence.
 SEEN_INSIDE_MINUTES = attendance.ATTENDANCE_ON_SITE_MINUTES
 GATE_NEWER_SECONDS = 120
+# Someone last recognised by an INSIDE camera (a hall) counts as inside this long without being
+# seen again (faces turned away are recognised only now and then); after that, not seen anywhere,
+# they count as outside ("likely outside", in Currently outside). Measured here: 82% of the gaps
+# between someone's sightings in office hours are 30 min or less; set to 40 min by the admin.
+INSIDE_KEEP_MINUTES = 40
+# Someone last recognised by the gate camera (it also sees the reception seating) counts as at
+# reception this long; then, seen nowhere else, "likely outside": the door is where people leave.
+GATE_KEEP_MINUTES = 15
+# The gate camera also sees the reception seating, which is inside: someone recognised there
+# within GATE_KEEP_MINUTES is at reception, not gone (a confirmed gate exit still wins). Only someone last seen at the gate and
+# then nowhere for longer than that is "likely outside".
 
 
 def _location(now: float, sessions: list[dict], current_out: float | None, sightings: list[dict],
@@ -721,8 +732,11 @@ def _location(now: float, sessions: list[dict], current_out: float | None, sight
         return {"location": "inside", "location_detail": f"came in through the gate at {clock(entry)}", "location_at": entry}
     if exit_at and t_in <= exit_at:
         return {"location": "outside", "location_detail": f"left through the gate at {clock(exit_at)}", "location_at": exit_at}
-    if last_in and now - t_in <= SEEN_INSIDE_MINUTES * 60 and t_in >= t_gate - GATE_NEWER_SECONDS:
+    if last_in and now - t_in <= INSIDE_KEEP_MINUTES * 60 and t_in >= t_gate - GATE_NEWER_SECONDS:
         return {"location": "inside", "location_detail": f"seen on {name(last_in['camera_id'])} at {clock(t_in)}", "location_at": t_in}
+    if last_gate and now - t_gate <= GATE_KEEP_MINUTES * 60:
+        return {"location": "inside", "location_detail": f"seen at reception ({name(last_gate['camera_id'])}) at {clock(t_gate)}",
+                "location_at": t_gate}
     if last_gate and last_in and t_gate > t_in + GATE_NEWER_SECONDS:
         return {"location": "likely_outside",
                 "location_detail": f"last seen at the gate ({name(last_gate['camera_id'])}) at {clock(t_gate)}, not inside since {clock(t_in)}",
@@ -731,6 +745,10 @@ def _location(now: float, sessions: list[dict], current_out: float | None, sight
         return {"location": "at_gate", "location_detail": f"only seen at the gate ({name(last_gate['camera_id'])}), last at {clock(t_gate)}",
                 "location_at": t_gate}
     newest = max(sightings, key=lambda x: x["last_seen"], default=None)
+    if newest and now - newest["last_seen"] > INSIDE_KEEP_MINUTES * 60:
+        return {"location": "likely_outside",
+                "location_detail": f"not seen anywhere since {clock(newest['last_seen'])} ({name(newest['camera_id'])})",
+                "location_at": newest["last_seen"]}
     if newest:
         return {"location": "unknown", "location_detail": f"not seen since {clock(newest['last_seen'])} ({name(newest['camera_id'])})",
                 "location_at": newest["last_seen"]}
@@ -855,12 +873,16 @@ def classify_range(day_from: str, day_to: str, employee_ids: list[str] | None = 
     end = datetime.date.fromisoformat(day_to)
     ids = employee_ids or sorted(employee_directory.EMPLOYEES)
     with _conn() as conn:
-        seen = {(r["employee_id"], r["day"]): dict(r) for r in conn.execute(
-            "SELECT * FROM attendance_days WHERE day >= ? AND day <= ?", (day_from, day_to))}
+        rows = [dict(r) for r in conn.execute("SELECT * FROM attendance_days WHERE day >= ? AND day <= ?", (day_from, day_to))]
+    from app import attendance
+
+    # Too few sightings that day (attendance.MIN_SIGHTINGS): a mistaken match, not a presence.
+    seen = {(r["employee_id"], r["day"]): r for r in rows if attendance.confirmed(r)}
+    unconfirmed = {(r["employee_id"], r["day"]) for r in rows if not attendance.confirmed(r)}
     start_ts = datetime.datetime.combine(start, datetime.time()).timestamp()
     end_ts = datetime.datetime.combine(end + datetime.timedelta(days=1), datetime.time()).timestamp()
     sessions = _sessions_between(start_ts, end_ts)
-    sightings = _sightings_between(start_ts, end_ts)
+    sightings = {k: v for k, v in _sightings_between(start_ts, end_ts).items() if k not in unconfirmed}
     gate_cams = _gate_cameras()
     from app import camera_db
 

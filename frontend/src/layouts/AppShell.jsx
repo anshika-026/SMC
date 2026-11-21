@@ -2,6 +2,7 @@ import { Outlet, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 import GlobalBackground from "../components/GlobalBackground";
+import IntrusionPopup from "../components/intrusion/IntrusionPopup";
 
 const TITLES = {
   "/dashboard": "Dashboard",
@@ -28,6 +29,7 @@ export default function AppShell() {
   return (
     <div className="isolate flex min-h-screen bg-[#f5f6fa]">
       <GlobalBackground />
+      <IntrusionPopup />
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
         <Topbar title={title} />

@@ -238,7 +238,7 @@ _thread: threading.Thread | None = None
 # image file and its row are deleted (the person stays in the count). Separate
 # from the hourly retention rules and always on, so the promise holds even with
 # RETENTION_ENABLED=false.
-FOOTFALL_PICTURE_HOURS = float(os.environ.get("FOOTFALL_PICTURE_HOURS", "24"))
+FOOTFALL_PICTURE_HOURS = float(os.environ.get("FOOTFALL_PICTURE_HOURS", "48"))  # pictures and clips kept at least 2 days
 FOOTFALL_PURGE_INTERVAL_SECONDS = 600
 _footfall_thread: threading.Thread | None = None
 

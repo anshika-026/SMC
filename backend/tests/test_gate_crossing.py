@@ -142,3 +142,12 @@ def test_gate_line_validation_and_unchanged_area_zones(gate):
                                                             "polygon": [[0.05, 0.05], [0.45, 0.05], [0.45, 0.95], [0.05, 0.95]]}).json()
     run(svc, cam, [[at(200, 5)]])
     assert [r["zone_name"] for r in alerts.list_alerts("all")] == [room["name"]]
+
+
+def test_first_seen_past_the_line_then_walking_further_in_counts():
+    """The door frame hides someone as they come through, so they are first seen already past the
+    line; walking further in from there is coming in. Going back out the same way is not."""
+    assert len(walk(GateCounter(), [480, 450, 420, 380, 350])) == 1     # appeared at the line, walked in
+    assert walk(GateCounter(), [350, 380, 420, 460, 490]) == []          # walked from inside towards the door
+    assert walk(GateCounter(), [300, 290, 300, 295]) == []              # sitting/standing inside
+    assert walk(GateCounter(), [380, 340, 300, 260]) == []              # already well inside, walking across
