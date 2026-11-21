@@ -35,8 +35,8 @@ export function AuthProvider({ children }) {
   const userRef = useRef(user);
   userRef.current = user;
 
-  const login = useCallback(async (email, password) => {
-    const res = await api.login(email, password);
+  const login = useCallback(async (email, password, portalTicket = null) => {
+    const res = await api.login(email, password, portalTicket);
     localStorage.setItem("deco_token", res.token);
     localStorage.setItem("deco_user", JSON.stringify(res.user));
     setUser(res.user);
@@ -73,27 +73,6 @@ export function AuthProvider({ children }) {
     localStorage.setItem("deco_user", JSON.stringify(clientUser));
     setUser(clientUser);
     return clientUser;
-  }, []);
-
-  // Arrival from the Deco Vision Master Portal (pages/Sso.jsx): the launch
-  // token becomes an SMC session, stored exactly like a normal login so every
-  // page, refresh and websocket works the same way.
-  const loginWithSso = useCallback(async (launchToken) => {
-    const res = await api.ssoExchange(launchToken);
-    const ssoUser = {
-      role: "admin",
-      sso: true,
-      name: res.name || res.username,
-      username: res.username,
-      email: "",
-      license: res.license,
-      loginUrl: res.license?.login_url || "",
-    };
-    localStorage.setItem("deco_token", res.token);
-    localStorage.setItem("deco_user", JSON.stringify(ssoUser));
-    applyLicense(res.license);
-    setUser(ssoUser);
-    return ssoUser;
   }, []);
 
   const logout = useCallback(() => {
@@ -155,7 +134,10 @@ export function AuthProvider({ children }) {
         const me = await api.getMe();
         if (cancelled) return;
         applyLicense(me.license);
-        updateUser({ license: me.license, ...(me.sso ? { loginUrl: me.license?.login_url || "" } : {}) });
+        updateUser({
+          license: me.license,
+          ...(me.license?.mode === "master" ? { loginUrl: me.license?.login_url || "", viaPortal: true } : {}),
+        });
       } catch {
         // offline / 401 already handled
       }
@@ -170,7 +152,7 @@ export function AuthProvider({ children }) {
   }, [loggedIn]);
 
   return (
-    <AuthContext.Provider value={{ user, login, loginAsClient, loginWithSso, logout, updateUser }}>
+    <AuthContext.Provider value={{ user, login, loginAsClient, logout, updateUser }}>
       {children}
     </AuthContext.Provider>
   );
